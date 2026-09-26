@@ -1,36 +1,19 @@
 {
-  "name": "fast-jev-compaction",
-  "version": "0.2.0",
-  "description": "Continuous, verbatim context compaction for LLM agents using TypeSafe's Jev model.",
+  "name": "fast-compact",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A fast, second compaction command for Claude Code: old tool output cut to its start and end, Jev keeping whole what is still needed.",
   "type": "module",
   "license": "MIT",
-  "engines": {
-    "node": ">=18"
-  },
-  "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
-    }
-  },
-  "files": [
-    "dist",
-    "README.md",
-    "LICENSE"
-  ],
   "scripts": {
-    "build": "tsc",
-    "typecheck": "tsc --noEmit && npm run typecheck:hooks",
-    "test": "vitest run",
-    "demo": "tsx examples/demo.ts",
-    "typecheck:hooks": "tsc -p tsconfig.hooks.json",
-    "validate:plugin": "claude plugin validate .claude-plugin/plugin.json"
+    "typecheck": "tsc -p tsconfig.json && tsc -p bench/tsconfig.json",
+    "test": "bun test tests/core && CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin test tests/plugin",
+    "validate": "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin validate .claude-plugin/plugin.json",
+    "types": "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude -p /plugin-types",
+    "bench": "bun bench/run.ts"
   },
   "devDependencies": {
     "@types/bun": "^1.4.2",
-    "@types/node": "^22.10.2",
-    "tsx": "^4.19.2",
-    "typescript": "^5.7.2",
-    "vitest": "^2.1.8"
+    "typescript": "^5.9.0"
   }
 }

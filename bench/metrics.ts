@@ -11,7 +11,7 @@
  * the window used that survive the cut, and the share of needed results that
  * keep at least one of them.
  */
-import type { CallAction } from '../src/types.js';
+import type { CallAction } from './upstream/types.js';
 import type { Scores } from './arms.js';
 import type { Candidate } from './points.js';
 
@@ -183,4 +183,37 @@ export function fixedCut(candidates: readonly Candidate[], chars: number): Tally
   return tally(candidates, (c) =>
     c.resultChars <= chars ? 'whole' : { head: Math.floor(chars * 0.7), tail: chars - Math.floor(chars * 0.7) },
   );
+}
+
+/**
+ * The plugin's own rule over a point's candidates: outputs from the newest
+ * `keepRecentCalls` calls, and outputs within 1.3 × `cutTo`, stay whole; of
+ * the rest, those ranked first (scores at or above `minKeepScore`, or newest
+ * first without scores) stay whole within `keepWhole` of their characters,
+ * and every other one keeps its first two thirds and last third of `cutTo`.
+ */
+export function pluginPolicy(
+  candidates: readonly Candidate[],
+  scores: Scores | undefined,
+  protectedFrom: number,
+  o: { cutTo: number; keepWhole: number; minKeepScore: number },
+): Tally {
+  const cuttable = candidates.filter((c) => c.callIndex < protectedFrom && c.resultChars > Math.ceil(o.cutTo * 1.3));
+  let left = o.keepWhole * cuttable.reduce((n, c) => n + c.resultChars, 0);
+  const order = scores
+    ? cuttable
+        .filter((c) => (scores.get(c.tool_use_id) ?? 0) >= o.minKeepScore)
+        .sort((a, b) => scores.get(b.tool_use_id)! - scores.get(a.tool_use_id)!)
+    : [...cuttable].sort((a, b) => b.callIndex - a.callIndex);
+  const whole = new Set<string>();
+  for (const c of order) {
+    const extra = c.resultChars - o.cutTo;
+    if (extra <= left) {
+      whole.add(c.tool_use_id);
+      left -= extra;
+    }
+  }
+  const cut = new Set(cuttable.filter((c) => !whole.has(c.tool_use_id)).map((c) => c.tool_use_id));
+  const head = Math.floor((o.cutTo * 2) / 3);
+  return tally(candidates, (c) => (cut.has(c.tool_use_id) ? { head, tail: o.cutTo - head } : 'whole'));
 }

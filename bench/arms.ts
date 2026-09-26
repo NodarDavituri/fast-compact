@@ -3,9 +3,9 @@
  * candidate (higher = keep first); upstream as shipped also yields its own
  * keep / truncate / drop decisions.
  */
-import { batchCalls, decideCall, questionsFor } from '../src/compact.js';
-import { collectToolCalls, estimateTokens, fitState, truncate } from '../src/state.js';
-import type { CallAction, ToolCall } from '../src/types.js';
+import { batchCalls, decideCall, questionsFor } from './upstream/compact.js';
+import { collectToolCalls, estimateTokens, fitState, truncate } from './upstream/state.js';
+import type { CallAction, ToolCall } from './upstream/types.js';
 import { ask } from './jev.js';
 import type { Point } from './points.js';
 import type { BenchMessage } from './transcript.js';
@@ -174,4 +174,34 @@ function runOf(
     stage,
     model: answer.model,
   };
+}
+
+/**
+ * The plugin as shipped: its state and question (src/), asked about every
+ * candidate so the ranking compares with the other arms.
+ */
+export async function pluginJev(point: Point): Promise<JevRun> {
+  const { collectCalls, fitState: fitPlugin } = await import('../src/state.js');
+  const { batchQuestions, neededQuestion } = await import('../src/jev.js');
+  const { protectedFrom } = await import('../src/compact.js');
+  const { DEFAULT_OPTIONS } = await import('../src/types.js');
+  const history = point.history as unknown as import('../src/types.js').Message[];
+  const calls = collectCalls(history);
+  const byUse = new Map(calls.map((c) => [c.tool_use_id, c]));
+  const fitted = fitPlugin(history, calls, {
+    maxTokens: DEFAULT_OPTIONS.maxStateTokens,
+    pinnedFrom: protectedFrom(history, DEFAULT_OPTIONS.keepRecentCalls),
+  });
+  const questions = new Map(
+    point.candidates.map((c) => [`need_${byUse.get(c.tool_use_id)!.id}`, neededQuestion(byUse.get(c.tool_use_id)!, true)]),
+  );
+  const batches = batchQuestions(questions, fitted.tokens, DEFAULT_OPTIONS.maxRequestTokens);
+  const answer = await ask(`${point.id}-plugin`, fitted.state, batches as Record<string, unknown>[]);
+  const scores: Scores = new Map();
+  for (const c of point.candidates) {
+    const p = answer.answers[`need_${byUse.get(c.tool_use_id)!.id}`]?.noul;
+    if (typeof p !== 'number') throw new Error(`${point.id}: no plugin answer for ${c.tool_use_id}`);
+    scores.set(c.tool_use_id, p);
+  }
+  return runOf(answer, scores, fitted.stage);
 }

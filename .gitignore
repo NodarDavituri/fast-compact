@@ -3,3 +3,4 @@ dist
 .env
 demo/JevDemo/build
 bench/.cache/
+.claude/types/

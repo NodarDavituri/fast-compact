@@ -12,7 +12,9 @@
  * rows (ids, sizes, labels, scores — no content).
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { baselineScores, neededJev, upstreamJev, type Scores } from './arms.js';
+import { baselineScores, neededJev, pluginJev, upstreamJev, type Scores } from './arms.js';
+import { protectedFrom } from '../src/compact.js';
+import { DEFAULT_OPTIONS } from '../src/types.js';
 import { redactedTotal } from './jev.js';
 import {
   addTally,
@@ -20,6 +22,7 @@ import {
   budgeted,
   emptyTally,
   headTail,
+  pluginPolicy,
   fixedCut,
   recall,
   tilted,
@@ -81,7 +84,7 @@ const setScores = (arm: string, point: Point, scores: Scores): void => {
   byPoint.set(point.id, scores);
   arms.set(arm, byPoint);
 };
-const upstreamActions = new Map<string, Map<string, import('../src/types.js').CallAction>>();
+const upstreamActions = new Map<string, Map<string, import('./upstream/types.js').CallAction>>();
 const jevTotals = { cost: 0, inputTokens: 0, requests: 0, cached: 0, stages: new Map<string, number>(), model: '' };
 const failures: string[] = [];
 
@@ -99,11 +102,13 @@ if (flag('jev')) {
   await Promise.all(
     points.map(async (point) => {
       try {
-        const [j0, j1, j1ns] = await Promise.all([
+        const [j0, j1, j1ns, jp] = await Promise.all([
           upstreamJev(point),
           neededJev(point, true),
           neededJev(point, false),
+          pluginJev(point),
         ]);
+        setScores('jev_plugin', point, jp.scores);
         setScores('jev_upstream', point, j0.scores);
         setScores('jev_needed', point, j1.scores);
         setScores('jev_needed_nosample', point, j1ns.scores);
@@ -113,7 +118,7 @@ if (flag('jev')) {
           new Map(point.candidates.map((c) => [c.tool_use_id, (c.isError ? 10 : 0) + j1.scores.get(c.tool_use_id)!])),
         );
         upstreamActions.set(point.id, j0.actions);
-        for (const run of [j0, j1, j1ns]) {
+        for (const run of [j0, j1, j1ns, jp]) {
           jevTotals.cost += run.cost;
           jevTotals.inputTokens += run.inputTokens;
           jevTotals.requests += run.requests;
@@ -215,6 +220,17 @@ for (const arm of ['random', 'jev_needed', 'largest']) {
     `| head_tail tilted by ${arm} | – | – | ${at.map((r) => pct(r.tokens)).join(' | ')} | ${at.map((r) => pct(r.results)).join(' | ')} | ${pct(ci[0])}–${pct(ci[1])} |`,
   );
 }
+
+const policyLines = ['', '| the plugin rule (newest 10 calls and outputs under 1,950 chars whole; the rest cut to 1,000 + 500 unless kept whole) | size kept | tokens kept | needed results | head_tail at the same size: tokens | needed results |', '|---|---|---|---|---|---|'];
+const policyOf = (label: string, scoresOf: (p: Point) => Scores | undefined, keepWhole = DEFAULT_OPTIONS.keepWhole): void => {
+  const r = recall(tallyOver(scored, (p) => pluginPolicy(p.candidates, scoresOf(p), protectedFrom(p.history as never, DEFAULT_OPTIONS.keepRecentCalls), { ...DEFAULT_OPTIONS, keepWhole })));
+  const same = recall(tallyOver(scored, (p) => headTail(p.candidates, r.size)));
+  policyLines.push(`| ${label} | ${pct(r.size)} | ${pct(r.tokens)} | ${pct(r.results)} | ${pct(same.tokens)} | ${pct(same.results)} |`);
+};
+policyOf('no whole keeps (every old output cut)', () => undefined, 0);
+policyOf('newest kept whole (no Jev)', () => undefined);
+if (arms.has('jev_plugin')) policyOf('Jev keeps whole (as shipped)', (p) => arms.get('jev_plugin')!.get(p.id));
+lines.push(...policyLines);
 
 const fixedLines = ['', '| fixed cut per result | size kept | tokens kept | needed results | head_tail at the same size: tokens |', '|---|---|---|---|---|'];
 for (const chars of [300, 1000, 2000, 4000]) {

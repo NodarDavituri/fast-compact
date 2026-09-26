@@ -19,7 +19,7 @@
  *   - in the window, a tool result or a user message carried it before the
  *     assistant used it (the use did not depend on the history).
  */
-import { collectToolCalls } from '../src/state.js';
+import { collectToolCalls } from './upstream/state.js';
 import { type BenchMessage, listTranscripts, readSegments, type Segment } from './transcript.js';
 
 export const TOKEN_RE = /[A-Za-z0-9_][A-Za-z0-9_./~@:#+-]{6,}[A-Za-z0-9_]/g;

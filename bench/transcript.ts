@@ -9,7 +9,7 @@
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
-import type { Message, ToolResult } from '../src/types.js';
+import type { Message, ToolResult } from './upstream/types.js';
 
 export interface BenchMessage extends Message {
   uuid: string;

@@ -1,62 +1,77 @@
 {
-  "name": "fast-jev-compaction",
-  "version": "0.3.0",
-  "description": "Verbatim Jev-guided compaction for Claude Code sessions.",
+  "name": "fast-compact",
+  "version": "0.1.0",
+  "description": "/fast-compact (and /fc): cut old tool output to its start and end in about a second, with Jev keeping whole what is still needed and every cut saved to a file. Claude Code's own /compact is untouched.",
+  "author": { "name": "Nodar Davituri", "url": "https://github.com/NodarDavituri" },
+  "homepage": "https://github.com/NodarDavituri/fast-compact",
+  "repository": "https://github.com/NodarDavituri/fast-compact",
   "license": "MIT",
+  "keywords": ["compaction", "context", "jev", "typesafe", "openrouter"],
   "userConfig": {
+    "provider": {
+      "type": "string",
+      "title": "Jev provider",
+      "description": "openrouter (default; key in OPENROUTER_API_KEY) or typesafe (key in TYPESAFE_API_KEY).",
+      "default": "openrouter"
+    },
     "apiKey": {
       "type": "string",
-      "title": "TypeSafe API key",
-      "description": "TypeSafe API key. Leave unset to use TYPESAFE_API_KEY.",
+      "title": "API key",
+      "description": "Key for the provider. Leave unset to use OPENROUTER_API_KEY or TYPESAFE_API_KEY from the environment or settings.",
       "sensitive": true
     },
-    "keepThreshold": {
-      "type": "number",
-      "title": "Keep threshold",
-      "description": "Minimum Jev probability that a tool call or tool result is still needed; below it the item is removed.",
-      "default": 0.5
-    },
-    "preserveRecentMessages": {
-      "type": "number",
-      "title": "Recent messages to preserve",
-      "description": "Number of newest messages pinned from compaction.",
-      "default": 6
-    },
-    "compactAtPercent": {
-      "type": "number",
-      "title": "Compaction percentage",
-      "description": "Context percentage at which turn.complete requests compaction.",
-      "default": 60
-    },
-    "minReductionRatio": {
-      "type": "number",
-      "title": "Minimum reduction ratio",
-      "description": "Minimum estimated character reduction required to replace history.",
-      "default": 0.25
-    },
-    "maxStateTokens": {
-      "type": "number",
-      "title": "Maximum Jev state tokens",
-      "description": "Estimated token budget for the conversation state sent with every Jev request.",
-      "default": 25000
-    },
-    "maxRequestTokens": {
-      "type": "number",
-      "title": "Maximum Jev request tokens",
-      "description": "Estimated token budget for state plus questions in one Jev request.",
-      "default": 30000
-    },
-    "truncateHeadChars": {
-      "type": "number",
-      "title": "Truncated tool result head",
-      "description": "Characters of a tool result kept when Jev decides its full output is no longer needed; 0 keeps only the note.",
-      "default": 300
+    "baseUrl": {
+      "type": "string",
+      "title": "Endpoint override",
+      "description": "A System One endpoint other than the provider's own. Leave unset."
     },
     "model": {
       "type": "string",
       "title": "Jev model",
-      "description": "TypeSafe Jev model name.",
+      "description": "Model name sent with each request.",
       "default": "jev-latest"
+    },
+    "keepRecentCalls": {
+      "type": "number",
+      "title": "Recent tool calls kept as they are",
+      "description": "The newest tool calls whose inputs and outputs are never cut.",
+      "default": 10
+    },
+    "cutTo": {
+      "type": "number",
+      "title": "Characters a cut keeps",
+      "description": "A cut output or input keeps this many characters: two thirds from its start, one third from its end.",
+      "default": 1500
+    },
+    "keepWhole": {
+      "type": "number",
+      "title": "Share Jev may keep whole",
+      "description": "At most this share of the old outputs' characters stays whole on Jev's ranking (0 to 1).",
+      "default": 0.25
+    },
+    "minKeepScore": {
+      "type": "number",
+      "title": "Least Jev score to keep whole",
+      "description": "An output Jev rates below this is never kept whole (0 to 1).",
+      "default": 0.45
+    },
+    "cutInputs": {
+      "type": "boolean",
+      "title": "Cut long tool inputs too",
+      "description": "Cut long old tool inputs (Bash scripts, Write bodies, Edit strings) the same way.",
+      "default": true
+    },
+    "sendSamples": {
+      "type": "boolean",
+      "title": "Show Jev output samples",
+      "description": "Send Jev the first 200 and last 100 characters of each output it ranks.",
+      "default": true
+    },
+    "resumeSafe": {
+      "type": "boolean",
+      "title": "Keep the compaction across --resume",
+      "description": "Hand messages back as new ones, so a resumed session loads the compacted history (older messages lose hidden reasoning and images; text and tool calls stay).",
+      "default": true
     }
   }
 }

@@ -1,202 +1,90 @@
-export type Role = 'user' | 'assistant';
-
 /**
- * A tool_use block of an assistant message. `text` and `isError` mirror the
- * outcome once the transcript holds it (Claude Code attaches them).
+ * The message shape a `session.compact` hook receives (a subset of Claude
+ * Code's `SessionMessage`): one message per content block, tool calls on the
+ * assistant side, their outputs on the user side, and the engine's `handle`
+ * on every message it handed over.
  */
 export interface ToolUse {
   tool_use_id: string;
   tool: string;
   input: Record<string, unknown>;
+  /** The output as the model read it, once the transcript holds it. */
   text?: string;
-  isError?: boolean;
+  isError?: true;
+  result?: unknown;
 }
 
-/** A tool_result block of a user message. */
 export interface ToolResult {
   tool_use_id: string;
   text: string;
-  isError?: boolean;
+  isError: boolean;
+  result?: unknown;
 }
 
-/**
- * One transcript message. The shape is a subset of Claude Code's
- * `SessionMessage`, so a session transcript can be passed in as is.
- */
 export interface Message {
-  role: Role;
+  role: 'user' | 'assistant';
   text: string;
   toolUses: ToolUse[];
   toolResults?: ToolResult[];
+  /** The engine's token for a message it handed over; absent on one built here. */
+  handle?: string;
 }
 
-/** A tool call paired with its result by `tool_use_id`. */
-export interface ToolCall {
-  /** Short id used in the Jev state and question names (`t1`, `t2`, ...). */
-  id: string;
-  tool_use_id: string;
-  tool: string;
-  input: Record<string, unknown>;
-  /** Index of the message holding the tool_use block. */
-  callIndex: number;
-  /** Index of the message holding the tool_result block. */
-  resultIndex: number;
-  resultChars: number;
-  isError: boolean;
-  /** In the first or the newest preserved messages; never a candidate. */
-  pinned: boolean;
-}
-
-export interface CallAnswer {
-  /** Jev's probability that the call itself still matters. */
-  keepCall: number;
-  /** Jev's probability that the full result still needs to stay verbatim. */
-  keepResult: number;
-}
-
-export type CallAction = 'keep' | 'drop_result' | 'drop_call';
-
-export interface CallDecision extends CallAnswer {
-  id: string;
-  tool: string;
-  action: CallAction;
-  reason: 'pinned' | 'kept' | 'result_dropped' | 'call_dropped';
-}
-
-export interface HistoryToolCall {
-  id: string;
-  tool: string;
-  input: string;
-  result: string;
-}
-
-export interface HistoryEntry {
-  i: number;
-  role: Role;
-  text: string;
-  /** Structured per call, or one compact line per call once the state has to shrink. */
-  tool_calls?: HistoryToolCall[] | string[];
-}
-
-/** The state sent with every Jev request: the whole history, results omitted. */
-export interface CompactionState {
-  context: string;
-  goal: string;
-  history: HistoryEntry[];
-}
-
-export interface FittedState {
-  state: CompactionState;
-  tokens: number;
-  /** Which fitting stage produced the state, for diagnostics. */
-  stage: string;
-}
-
-export interface CompactOptions {
-  /** Ongoing task description; defaults to the last few user prompts. */
-  goal?: string;
-  /** Minimum keep probability for a call or result to stay. Default 0.5. */
-  keepThreshold?: number;
-  /** Newest messages never touched (the first message is always kept). Default 6. */
-  preserveRecentMessages?: number;
-  /** Estimated token ceiling for the state. Default 25000. */
-  maxStateTokens?: number;
-  /** Estimated token ceiling for state plus one batch of questions. Default 30000. */
-  maxRequestTokens?: number;
-  /** Characters of a dropped tool result to retain. Default 300. */
-  truncateHeadChars?: number;
-}
-
-export interface ResolvedCompactOptions {
-  goal: string;
-  keepThreshold: number;
-  preserveRecentMessages: number;
+export interface Options {
+  /** The newest tool calls whose inputs and outputs are never cut. */
+  keepRecentCalls: number;
+  /** Characters a cut output or input field keeps: two thirds from its start, one third from its end. */
+  cutTo: number;
+  /** Characters a cut host notice keeps from its start. */
+  noticeCutTo: number;
+  /** At most this share of the old outputs' characters is kept whole on Jev's say. */
+  keepWhole: number;
+  /** Jev's probability below which an output is never kept whole. */
+  minKeepScore: number;
+  /** Cut long tool inputs (Bash scripts, Write bodies, Edit strings) too. */
+  cutInputs: boolean;
+  /** Send Jev the start and end of each output it judges. */
+  sendSamples: boolean;
+  /** Hand every message back without its handle, so --resume keeps the compaction. */
+  resumeSafe: boolean;
+  /** Estimated token ceilings for the Jev state and for one request. */
   maxStateTokens: number;
   maxRequestTokens: number;
-  truncateHeadChars: number;
 }
 
-export interface CompactResult {
-  /** The compacted transcript; untouched messages are the input objects. */
-  messages: Message[];
-  decisions: CallDecision[];
-  stats: {
-    messagesBefore: number;
-    messagesAfter: number;
-    charsBefore: number;
-    charsAfter: number;
-    calls: number;
-    kept: number;
-    resultsDropped: number;
-    callsDropped: number;
-    pinned: number;
-    stateTokens: number;
-    /** Which fitting stage the state needed, '' when no request was made. */
-    stateStage: string;
-    requests: number;
-    ms: number;
-  };
+export const DEFAULT_OPTIONS: Options = {
+  keepRecentCalls: 10,
+  cutTo: 1500,
+  noticeCutTo: 300,
+  keepWhole: 0.25,
+  minKeepScore: 0.45,
+  cutInputs: true,
+  sendSamples: true,
+  resumeSafe: true,
+  maxStateTokens: 25_000,
+  maxRequestTokens: 60_000,
+};
+
+export type CutKind = 'output' | 'input' | 'notice';
+
+/** One thing a compaction cuts, and where its full text goes. */
+export interface Cut {
+  kind: CutKind;
+  /** Stable name for the archive file: the tool_use_id (plus the input field) or the message index. */
+  key: string;
+  /** Index of the message holding it. */
+  index: number;
+  tool_use_id?: string;
+  /** The input field cut, for `input`. */
+  field?: string;
+  tool?: string;
+  original: string;
 }
 
-/** The `state` of a Jev request: a string or any JSON-serialisable object. */
-export type JevState = string | object;
+/** One question's answer: Jev's probability that the output will be needed again. */
+export type Scores = ReadonlyMap<string, number>;
 
-export interface NoulQuestion {
-  type: 'noul';
-  instructions: string;
-  criteria?: {
-    true?: string;
-    false?: string;
-  };
-}
-
-export interface ChoiceQuestion {
-  type: 'choice';
-  instructions: string;
-  criteria: Record<string, string | null>;
-}
-
-export interface ScoreQuestion {
-  type: 'score';
-  instructions: string;
-  criteria: string[];
-}
-
-export type JevQuestion = NoulQuestion | ChoiceQuestion | ScoreQuestion;
-export type JevQuestions = Record<string, JevQuestion>;
-
-export interface NoulAnswer {
-  type?: 'noul';
-  noul: number;
-}
-
-export interface ChoiceAnswer {
-  type?: 'choice';
-  choice: string;
-  confidence: number;
-  probabilities: Record<string, number>;
-}
-
-export interface ScoreAnswer {
-  type?: 'score';
-  score: number;
-  confidence: number;
-  probabilities: Record<string, number>;
-}
-
-export type JevAnswer = NoulAnswer | ChoiceAnswer | ScoreAnswer;
-
-export interface JevResponse {
-  model?: string;
-  answers: Record<string, JevAnswer>;
-  usage?: {
-    input_tokens?: number;
-    output_tokens?: number;
-  };
-  [key: string]: unknown;
-}
-
-/** Anything that can answer Jev questions: `JevClient`, or a host-provided adapter. */
-export interface JevAsker {
-  ask(state: JevState, questions: JevQuestions): Promise<JevResponse>;
+/** Answers the questions over one state, in whatever batches the transport needs. */
+export interface Asker {
+  ask(state: object, questions: Record<string, object>): Promise<Record<string, number>>;
 }

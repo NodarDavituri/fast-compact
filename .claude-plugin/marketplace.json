@@ -1,15 +1,13 @@
 {
-  "name": "fast-jev-compaction",
-  "owner": {
-    "name": "tamaratran",
-    "url": "https://github.com/tamaratran"
-  },
+  "name": "fast-compact",
+  "description": "fast-compact: a second, fast compaction command for Claude Code, beside the built-in /compact.",
+  "owner": { "name": "Nodar Davituri", "url": "https://github.com/NodarDavituri" },
   "plugins": [
     {
-      "name": "fast-jev-compaction",
+      "name": "fast-compact",
       "source": "./",
-      "description": "Verbatim Jev-guided compaction for Claude Code sessions.",
-      "version": "0.3.0",
+      "description": "/fast-compact (and /fc): cut old tool output to its start and end in about a second, with Jev keeping whole what is still needed and every cut saved to a file.",
+      "version": "0.1.0",
       "license": "MIT"
     }
   ]

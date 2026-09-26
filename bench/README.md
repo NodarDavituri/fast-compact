@@ -28,7 +28,7 @@ Options: `--n 150` points to sample, `--root <dir>` for the transcripts (default
 
 It is a proxy: it misses a result whose *meaning* mattered without any token being reused, and it favours large outputs (more tokens, more chances). `spotcheck.ts` measures how far it agrees with a reader who judges blind.
 
-**Methods** (`arms.ts`), each a score per candidate: `random`; `newest`; `largest`; `smallest`; `errors_then_newest`; `oracle` (the label itself — the ceiling); `jev_upstream` (upstream's state, its two questions, its `keepResult` answer); `jev_needed` (the reworded question — "holds something the assistant will need again" — with true/false criteria and a 300-character sample of the output inside the question, over upstream's state with the goal taken from the person's own prompts); `jev_needed_nosample`; `jev_needed+errors`.
+**Methods** (`arms.ts`), each a score per candidate: `random`; `newest`; `largest`; `smallest`; `errors_then_newest`; `oracle` (the label itself — the ceiling); `jev_upstream` (upstream's state, its two questions, its `keepResult` answer); `jev_needed` (the reworded question — "holds something the assistant will need again" — with true/false criteria and a 300-character sample of the output inside the question, over upstream's state with the goal taken from the person's own prompts); `jev_needed_nosample`; `jev_needed+errors`; `jev_plugin` — the plugin as shipped: its own state and question from `src/`, asked about every candidate.
 
 **Metrics** (`metrics.ts`).
 
@@ -36,5 +36,6 @@ It is a proxy: it misses a result whose *meaning* mattered without any token bei
 - *At a budget* of 15%, 30% and 50% of the candidates' characters: every candidate becomes a stub (first 200 and last 100 characters) unless the method keeps it whole, in its own order, while the total fits. Reported: the share of needed tokens that survive, and the share of needed results that keep at least one. 95% intervals by bootstrap over points.
 - `head_tail` cuts every result to the same fraction (70% from the start, 30% from the end); `head_tail tilted by <score>` lets a score shift how much of each result is kept, at the same total.
 - *Upstream as shipped*: its own decisions at its 0.5 threshold (keep, truncate to a 300-character head, or drop call and result).
+- *The plugin's rule*: outputs from the newest ten calls and outputs under 1,950 characters stay whole; of the rest, the top-ranked stay whole within a quarter of their characters and every other one keeps its first 1,000 and last 500 characters — with Jev's ranking, with newest-first, and with no whole keeps, each against `head_tail` at the same size.
 
 Jev requests carry the conversation text and tool inputs (and, for `jev_needed`, output samples); credential-shaped strings are masked per string before sending. `bench/.cache/` (gitignored) keeps the answers by request hash, so a rerun costs nothing, and per-candidate rows with ids, sizes, labels and scores only.

@@ -90,8 +90,12 @@ if (process.argv[2] === 'export') {
   console.log(`${answers.length} answers, ${judged.length} decided (${answers.length - judged.length} unclear)`);
   console.log('proxy × reader:', table);
   const readerLabels = judged.map((a) => a.label === 'needed');
-  for (const arm of Object.keys(key[judged[0]!.key]!.scores)) {
-    const s = judged.map((a) => key[a.key]!.scores[arm]!);
+  const current = new Map(
+    readFileSync(ROWS, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l) as Row).map((r) => [`${r.point} ${r.id}`, r.scores]),
+  );
+  const scoresOf = (k: string): Record<string, number> => current.get(`${key[k]!.point} ${key[k]!.id}`) ?? key[k]!.scores;
+  for (const arm of Object.keys(scoresOf(judged[0]!.key))) {
+    const s = judged.map((a) => scoresOf(a.key)[arm]!);
     console.log(`AUC vs reader, ${arm}: ${auc(s, readerLabels)?.toFixed(3) ?? '–'}`);
   }
   console.log('where the needed part sits (reader):', Object.fromEntries(where));
@@ -114,7 +118,7 @@ if (process.argv[2] === 'score') {
   for (const label of ['needed', 'not_needed']) {
     const items = answers.filter((a) => a.label === label);
     console.log(`\nreader ${label} (${items.length}): kept whole at a budget of`);
-    for (const arm of ['random', 'newest', 'largest', 'jev_upstream', 'jev_needed']) {
+    for (const arm of ['random', 'newest', 'largest', 'jev_upstream', 'jev_needed', 'jev_plugin']) {
       const cells = [0.15, 0.3, 0.5].map((f) => {
         let whole = 0;
         let covered = 0;

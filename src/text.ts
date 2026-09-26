@@ -18,8 +18,12 @@ export function isHostText(text: string): boolean {
   return HOST_PREFIXES.some((prefix) => start.startsWith(prefix));
 }
 
+/** A marker this plugin wrote, whole: text that merely quotes its opening does not count. */
+const CUT_RE =
+  /\n\[fast-compact: cut \d+ chars (?:from the middle of [^\]\n]*?|of this notice); the full text is in [^\]\n]+\]/;
+
 export function wasCut(text: string): boolean {
-  return text.includes(CUT_MARK);
+  return CUT_RE.test(text);
 }
 
 /**

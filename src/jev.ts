@@ -169,7 +169,7 @@ export async function askAll(
         );
       } catch (error) {
         if (attempt < retries) {
-          await transport.sleep(1000 * 3 ** attempt);
+          await transport.sleep(300 * 3 ** attempt);
           continue;
         }
         throw new JevError(`the request failed: ${error instanceof Error ? error.message : String(error)}`, 'transport');
@@ -194,7 +194,7 @@ export async function askAll(
           return;
         }
         if ((error.kind === 'rate' || error.kind === 'server') && attempt < retries) {
-          await transport.sleep(1000 * 3 ** attempt);
+          await transport.sleep(300 * 3 ** attempt);
           continue;
         }
         throw error;

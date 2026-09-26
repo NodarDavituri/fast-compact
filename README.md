@@ -39,11 +39,11 @@ What the measurement found about Jev itself:
 | every output cut to its start and end, same size | 57% | 60% | 69% |
 | the newest stay whole, no Jev | 61% | 66% | 73% |
 
-A blind check agreed: four readers judged 100 outputs against the work that followed, and Jev's ranking matched them best (AUC 0.75, against 0.62 for the original's question and 0.56 for random). About 40% of the outputs they judged needed had the needed part in the middle — which is why nothing is cut without a copy on disk.
+A blind check agreed: four readers judged 100 outputs against the work that followed, and the shipped question ranked their judgement at AUC 0.75 (a reworded variant 0.79), against 0.62 for the original's question, 0.67 for largest-first and 0.56 for random. About 40% of the outputs they judged needed had the needed part in the middle — which is why nothing is cut without a copy on disk.
 
 ## Install
 
-Needs Claude Code 2.1.274 or later with function hooks turned on (an early-access plugin surface), and a key for Jev: an [OpenRouter](https://openrouter.ai) key, or a [TypeSafe](https://console.typesafe.ai/keys) key. In `~/.claude/settings.json`:
+Needs Claude Code with function hooks turned on (an early-access plugin surface; built and tested on 2.1.283), and a key for Jev: an [OpenRouter](https://openrouter.ai) key, or a [TypeSafe](https://console.typesafe.ai/keys) key. In `~/.claude/settings.json`:
 
 ```json
 { "env": { "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1", "OPENROUTER_API_KEY": "sk-or-…" } }
@@ -80,14 +80,16 @@ Set with `/plugin configure fast-compact`, or under `pluginConfigs` in `settings
 
 Each `/fc` sends Jev the conversation so far — your and Claude's text (long texts abridged), tool inputs (truncated), a one-line note per tool output, and, with `sendSamples`, the first 200 and last 100 characters of each output it ranks — plus one question per output. Credential-shaped strings (API keys, tokens, `PASSWORD=…`, URLs with passwords, private keys) are masked before sending; the masking is by pattern, so treat it as a safety net, not a guarantee. Nothing is sent when no key is set.
 
-The full text of every cut goes to `~/.claude/fast-compact/<session>/`, next to where Claude Code already keeps your transcripts, and one line per `/fc` to `~/.claude/fast-compact/ledger.jsonl` (sizes, counts, cost). Nothing is deleted automatically; `find ~/.claude/fast-compact -mindepth 1 -maxdepth 1 -type d -mtime +30 -exec rm -r {} +` clears sessions older than a month.
+The full text of every cut goes to `~/.claude/fast-compact/<session>/`, next to where Claude Code already keeps your transcripts, and one line per `/fc` to `~/.claude/fast-compact/ledger-<year>-<month>.jsonl` (sizes, counts, cost). Nothing is deleted automatically; `find ~/.claude/fast-compact -mindepth 1 -maxdepth 1 -type d -mtime +30 -exec rm -r {} +` clears sessions older than a month.
 
 ## Limits
 
 - Function hooks are early access: a Claude Code update can change them. If `/fc` stops answering, check `claude plugin validate` and the plugin's `hooks module … loaded` line in a `--debug-file` log.
 - The transcript shows `/compact [fast-compact]`: `/fc` runs Claude Code's own `/compact` as its vehicle and this plugin answers that compaction. (Claude Code refuses a compaction started from inside a command's hook, and does not run a plugin's hooks on a compaction the plugin started itself.)
 - Only tool output, tool input and host notices are cut. A conversation that is mostly text shrinks with `/compact`, not `/fc`.
-- With `resumeSafe`, older messages lose hidden reasoning and pasted images; their text and tool calls stay.
+- With `resumeSafe`, older messages lose hidden reasoning, and a message that held only an image or only hidden reasoning is dropped; text and tool calls stay.
+- Jev gets up to six seconds per request inside the hook's ten-second budget; a slower or silent endpoint means the newest outputs stay whole for that run instead.
+- Any main-conversation compaction whose instructions start with `[fast-compact]` is this plugin's — including a `/compact [fast-compact]` you type yourself.
 - Cuts are measured in characters, not tokens.
 - The bench is one person's sessions, with a proxy label checked on 100 outputs by model readers. Run it on your own: `bun bench/run.ts --jev`.
 

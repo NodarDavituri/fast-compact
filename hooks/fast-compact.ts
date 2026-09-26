@@ -11,9 +11,6 @@ import { applyCuts, decide, fresh, sizeOf, type Decision, type JevAccess } from 
 import { DEFAULT_MODEL, ENDPOINTS, type Provider } from '../src/jev.js';
 import { DEFAULT_OPTIONS, type Cut, type Message, type Options } from '../src/types.js';
 
-const JEV_TIMEOUT_MS = 30_000;
-const WRITE_LIMIT = 3_500_000;
-
 interface Settings {
   options: Options;
   provider: Provider;
@@ -84,25 +81,48 @@ export function reportOf(decision: Decision, before: number, after: number, cuts
 }
 
 /**
- * The instructions the scheduled `/compact` carries: how this plugin knows its
- * own request, and, should its hook not run, what the built-in summary is told.
+ * The instructions the scheduled `/compact` carries. A main-conversation
+ * compaction whose instructions start with it is this plugin's, whatever else
+ * is pending: it is answered here, never handed to the built-in summary.
  */
 export const MARKER = '[fast-compact]';
+
 export function markerOf(focus: string): string {
   return focus ? `${MARKER} ${focus}` : MARKER;
 }
 
-/** How long a request from the command waits for its compaction before it lapses. */
-const REQUEST_TTL_MS = 60_000;
+/** The focus a marked compaction carries ('' for none), or undefined for one that is not marked. */
+export function focusOf(instructions: string | undefined): string | undefined {
+  const text = instructions?.trimStart() ?? '';
+  return text.startsWith(MARKER) ? text.slice(MARKER.length).trim() : undefined;
+}
+
+/** A /fc whose /compact has not settled holds off another; one stuck this long is let go. */
+const STUCK_MS = 120_000;
+/** The longest one Jev request may wait, and what is kept back of the hook's 10 s budget. */
+const JEV_WAIT_MS = 6_000;
+const BUDGET_RESERVE_MS = 2_500;
+/** Characters per archive file: at most 3 MB of UTF-8 whatever the text (the host refuses writes over 4 MiB). */
+const PART_CHARS = 1_000_000;
+
+/** `text` in pieces of at most `size` characters, never splitting a surrogate pair. */
+function parts(text: string, size: number): string[] {
+  const out: string[] = [];
+  for (let at = 0; at < text.length; ) {
+    let end = Math.min(text.length, at + size);
+    const last = text.charCodeAt(end - 1);
+    if (end < text.length && last >= 0xd800 && last <= 0xdbff) end--;
+    out.push(text.slice(at, end));
+    at = end;
+  }
+  return out.length > 0 ? out : [''];
+}
 
 export const register: Register = (on, options) => {
   const settings = settingsOf(options);
-  /**
-   * Set by the command for the compaction it schedules; only that compaction
-   * is this plugin's, and a request that never arrives lapses.
-   */
-  let requested: { focus: string; at: number } | undefined;
-  /** The account of the last compaction, logged once the /compact it rode on has finished. */
+  /** The /fc whose scheduled /compact has not settled yet. */
+  let running: { at: number } | undefined;
+  /** What the last compaction did, logged once the /compact it rode on has finished (a log line written during a compaction is lost with the screen). */
   let report: string | undefined;
 
   on('session.start', async ($, e, next) => {
@@ -121,54 +141,52 @@ export const register: Register = (on, options) => {
   });
 
   // The host refuses a compaction started inside a command's own hook (the
-  // command holds the turn), so the command schedules it for the moment after
-  // it returns, and the compaction reports in the transcript when it is done.
+  // command holds the turn) and skips this plugin's hooks on one it starts
+  // itself, so the command schedules Claude Code's own /compact, marked, for
+  // the moment after it returns; the session.compact hook below answers it.
   on('command.run', async ($, e, next) => {
     if (e.command !== 'fast-compact' && e.command !== 'fc') return next(e);
     const now = await $.clock.now();
-    if (requested && now - requested.at < REQUEST_TTL_MS) {
-      return { text: 'a compaction is already on its way' };
-    }
+    if (running && now - running.at < STUCK_MS) return { text: 'a compaction is already running' };
     const focus = e.args.trim();
-    requested = { focus, at: now };
+    const mine = { at: now };
+    running = mine;
+    report = undefined;
     $.clock.after(0, () => {
       $.command
         .run({ command: 'compact', args: markerOf(focus) })
         .then(() => {
-          if (report) $.ui.log(report);
-          else if (requested) $.ui.log('the compaction did not reach this plugin; nothing was cut');
-          report = undefined;
+          $.ui.log(report ?? 'the compaction did not reach this plugin; nothing was cut');
         })
         .catch((error: unknown) => {
           $.ui.log(`could not compact (${error instanceof Error ? error.message : String(error)})`);
         })
         .finally(() => {
-          requested = undefined;
+          report = undefined;
+          if (running === mine) running = undefined;
         });
     });
     return { text: `compacting${focus ? ` (keeping: ${focus})` : ''}…` };
   });
 
   on('session.compact', async ($, e, next) => {
-    // The compaction the command scheduled arrives as `plugin` or, in 2.1.283,
-    // as `manual`; it is recognised by the pending request and its instructions,
-    // never by the trigger alone, and auto, precompute and subagents never are.
-    const pending = requested;
-    const ours =
-      pending !== undefined &&
-      (e.trigger === 'plugin' || e.trigger === 'manual') &&
-      !e.agentId &&
-      (e.instructions ?? '') === markerOf(pending.focus);
-    if (!ours || !pending) return next(e);
-    requested = undefined;
-    if ((await $.clock.now()) - pending.at > REQUEST_TTL_MS) return next(e);
-    const focus = pending.focus;
+    // Ours is the main conversation's manual or plugin compaction carrying the
+    // marker (the scheduled /compact arrives as `manual` in 2.1.283); auto,
+    // precompute and subagent compactions, and every unmarked one, pass on.
+    const mainManual = !e.agentId && (e.trigger === 'plugin' || e.trigger === 'manual');
+    const focus = mainManual ? focusOf(e.instructions) : undefined;
+    if (focus === undefined) return next(e);
     const messages = e.messages as readonly Message[];
+    // $.clock.sleep counts against the hook's 10 s budget ($.http.fetch does
+    // not), so Jev's waits are sized from what is left, keeping a reserve for
+    // the archive writes; running short only means ranking newest first.
+    const left = (): number => next.budget.remainingMs;
 
     const home = (await $.env.get('HOME')) ?? '';
     const sessionId = await $.session.id();
     const dir = `${home}/.claude/fast-compact/${sessionId}`;
-    const stamp = new Date(await $.clock.now()).toISOString().replace(/[-:]/g, '').slice(0, 15);
+    const now = new Date(await $.clock.now()).toISOString();
+    const stamp = now.replace(/[-:]/g, '').slice(0, 15);
 
     let apiKey = settings.apiKey;
     if (!apiKey) {
@@ -189,15 +207,25 @@ export const register: Register = (on, options) => {
           now: () => $.clock.now(),
           transport: {
             post: async (url, headers, body) => {
-              const timedOut = { status: 0, text: 'timed out' };
-              const answer = await Promise.race([
-                $.http.fetch(url, { method: 'POST', headers, body }).then((r) => ({ status: r.status, text: r.text })),
-                $.clock.sleep(JEV_TIMEOUT_MS).then(() => timedOut),
-              ]);
-              if (answer === timedOut) throw new Error(`no answer in ${JEV_TIMEOUT_MS / 1000} s`);
-              return answer;
+              const wait = Math.min(JEV_WAIT_MS, left() - BUDGET_RESERVE_MS);
+              if (wait < 1000) throw new Error('no time left in the hook budget');
+              const stop = new AbortController();
+              const timedOut = { status: 0, text: '' };
+              try {
+                const answer = await Promise.race([
+                  $.http.fetch(url, { method: 'POST', headers, body }).then((r) => ({ status: r.status, text: r.text })),
+                  $.clock.sleep(wait, { signal: stop.signal }).then(
+                    () => timedOut,
+                    () => timedOut,
+                  ),
+                ]);
+                if (answer === timedOut) throw new Error(`no answer in ${(wait / 1000).toFixed(1)} s`);
+                return answer;
+              } finally {
+                stop.abort();
+              }
             },
-            sleep: (ms) => $.clock.sleep(ms),
+            sleep: (ms) => $.clock.sleep(Math.max(0, Math.min(ms, left() - BUDGET_RESERVE_MS - 1000))),
           },
         }
       : undefined;
@@ -205,51 +233,57 @@ export const register: Register = (on, options) => {
     const decision = await decide(messages, settings.options, jev, focus || undefined);
     if (decision.cuts.length === 0) {
       const why = `nothing old enough and long enough to cut (the newest ${settings.options.keepRecentCalls} tool calls are kept as they are)`;
-      $.ui.log(`${why}`);
+      report = why;
       return { skip: why };
     }
 
-    // A key carries a tool_use_id and, for an input, the field name (an MCP tool's own):
-    // only safe characters reach the file name.
+    // A key carries a tool_use_id and, for an input, the field name (an MCP
+    // tool's own): only safe characters reach the file name.
     const pathOf = (cut: Cut): string =>
       `${dir}/${cut.kind}-${(cut.kind === 'notice' ? `${stamp}-${cut.key}` : cut.key).replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '_')}.txt`;
+    const partsOf = new Map<Cut, number>();
+    const whereOf = (cut: Cut): string => {
+      const n = partsOf.get(cut) ?? 1;
+      return n > 1 ? `${pathOf(cut)} (continued in .part2 to .part${n} beside it)` : pathOf(cut);
+    };
     const saved: Cut[] = [];
     await Promise.all(
       decision.cuts.map(async (cut) => {
         try {
-          const path = pathOf(cut);
-          if (cut.original.length <= WRITE_LIMIT) await $.fs.write(path, cut.original);
-          else {
-            for (let part = 0, at = 0; at < cut.original.length; part++, at += WRITE_LIMIT) {
-              await $.fs.write(part === 0 ? path : `${path}.part${part + 1}`, cut.original.slice(at, at + WRITE_LIMIT));
-            }
+          const pieces = parts(cut.original, PART_CHARS);
+          for (const [i, piece] of pieces.entries()) {
+            await $.fs.write(i === 0 ? pathOf(cut) : `${pathOf(cut)}.part${i + 1}`, piece);
           }
+          partsOf.set(cut, pieces.length);
           saved.push(cut);
-        } catch (error) {
-          $.ui.log(`not cut, could not save ${cut.key} to ${pathOf(cut)}: ${error instanceof Error ? error.message : String(error)}`);
+        } catch {
+          // not saved, so not cut; counted in the report
         }
       }),
     );
+    const unsaved = decision.cuts.length - saved.length;
     if (saved.length === 0) {
-      $.ui.log('nothing cut — none of the full texts could be saved');
+      report = `nothing cut: none of the ${unsaved} full texts could be saved under ${dir}/`;
       return { skip: 'the full texts could not be saved' };
     }
 
-    const cut = applyCuts(messages, saved, pathOf, settings.options);
+    const cut = applyCuts(messages, saved, whereOf, settings.options);
     const compacted = settings.options.resumeSafe ? fresh(cut) : cut;
     const before = sizeOf(messages);
     const after = sizeOf(compacted);
-    report = reportOf(decision, before, after, saved, dir);
+    report = reportOf(decision, before, after, saved, dir) + (unsaved > 0 ? ` ${unsaved} left uncut: their full text could not be saved.` : '');
 
-    const ledger = `${home}/.claude/fast-compact/ledger.jsonl`;
+    // One ledger per month keeps each file far below the host's 4 MiB read limit.
+    const ledger = `${home}/.claude/fast-compact/ledger-${now.slice(0, 7)}.jsonl`;
     const line = JSON.stringify({
-      at: new Date(await $.clock.now()).toISOString(),
+      at: now,
       session: sessionId,
       before,
       after,
       outputs: saved.filter((c) => c.kind === 'output').length,
       inputs: saved.filter((c) => c.kind === 'input').length,
       notices: saved.filter((c) => c.kind === 'notice').length,
+      unsaved,
       whole: decision.whole.size,
       ranking: decision.ranking,
       jev: decision.jev
@@ -265,8 +299,11 @@ export const register: Register = (on, options) => {
     }
     return { messages: compacted };
   }).catch((_$, _e, next) => {
-    // A failure on this plugin's own compaction answers a skip, never the built-in summary.
+    // A failure on this plugin's own compaction answers a skip, never the
+    // built-in summary; one on a compaction it passed on stands as it was.
     if (next.called) return undefined;
-    return { skip: `fast-compact failed: ${String(next.error)}` };
+    const why = `failed (${next.error.kind}${next.error.message ? `: ${next.error.message}` : ''}); nothing was cut`;
+    report = why;
+    return { skip: `fast-compact ${why}` };
   });
 };

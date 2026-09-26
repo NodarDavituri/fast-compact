@@ -1,3 +1,5 @@
+// From tamaratran/fast-jev-compaction at e3f262a (MIT, Copyright (c) 2025), unchanged:
+// the library as shipped, kept so the bench can measure it. Not used by the plugin.
 import { noulAnswer } from './request.js';
 import { collectToolCalls, estimateTokens, fitState } from './state.js';
 import type {

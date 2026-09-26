@@ -21,12 +21,15 @@ interface World {
   requests: { url: string; body: string }[];
 }
 
-function world(on: On, options: { env?: Record<string, string>; jev?: (body: string) => { status: number; text: string }; failWrite?: string } = {}): World {
+function world(
+  on: On,
+  options: { env?: Record<string, string>; jev?: (body: string) => { status: number; text: string }; failWrite?: string; noSession?: boolean; hang?: boolean } = {},
+): World {
   mock.env(on, { HOME: '/Users/tester', ...options.env });
   const w: World = { clock: mock.clock(on, { now: 1_790_000_000_000 }), files: new Map(), logs: [], requests: [] };
   // Core's /compact, which the plugin schedules; its compaction is driven by the test itself.
   on('command.run', (_$, e) => ({ text: e.command === 'compact' ? 'Compacted' : `no /${e.command} here` }));
-  on('session.id', () => ({ value: 'sess-1' }));
+  on('session.id', () => (options.noSession ? { deny: 'no session here' } : { value: 'sess-1' }));
   on('settings.read', () => ({ value: {} }));
   on('ui.log', (_$, e) => {
     w.logs.push(e.text);
@@ -43,6 +46,7 @@ function world(on: On, options: { env?: Record<string, string>; jev?: (body: str
     return text === undefined ? { deny: 'ENOENT' } : { value: text };
   });
   on('http.fetch', (_$, e) => {
+    if (options.hang) return new Promise(() => {});
     const body = String(e.init?.body ?? '');
     w.requests.push({ url: e.url, body });
     const answer = options.jev ? options.jev(body) : { status: 500, text: 'no Jev in this test' };
@@ -120,7 +124,8 @@ describe('/fc', () => {
     expect(w.requests[0]!.url).toBe('https://openrouter.ai/api/v1/systemone');
     expect(JSON.parse(w.requests[0]!.body).state.focus).toBe('the test');
     expect(w.logs.join('\n')).toMatch(/^.* → .* chars \(−\d+%\); 4 outputs cut, 1 kept whole on Jev’s ranking, 1 inputs cut; Jev typesafe\/jev-1\.13-test/);
-    const ledger = JSON.parse(w.files.get('/Users/tester/.claude/fast-compact/ledger.jsonl')!.trim());
+    const ledgerPath = [...w.files.keys()].find((p) => /\/ledger-\d{4}-\d{2}\.jsonl$/.test(p))!;
+    const ledger = JSON.parse(w.files.get(ledgerPath)!.trim());
     expect(ledger).toMatchObject({ session: 'sess-1', outputs: 4, inputs: 1, whole: 1, ranking: 'jev', provider: 'openrouter' });
   });
 
@@ -151,6 +156,7 @@ describe('/fc', () => {
     await $.command.run({ command: 'fc', args: '', ...COMMAND });
     const result = await $.session.compact({ trigger: 'manual', messages: conversation().slice(-12), instructions: '[fast-compact]' });
     expect(result.skip).toContain('nothing old enough');
+    await w.clock.advance(1);
     expect(w.logs.join('\n')).toContain('nothing old enough');
   });
 
@@ -182,5 +188,37 @@ describe('/fc', () => {
     await $.command.run({ command: 'fc', args: '', ...COMMAND });
     const result = await $.session.compact({ trigger: 'manual', messages: conversation(), agentId: 'agent-1', instructions: '[fast-compact]' });
     expect(result.messages?.[0]?.text).toBe('core summary');
+  });
+
+  test('a marked compaction is taken even with no /fc pending (late, or after a restart)', async ($, on) => {
+    world(on);
+    const result = await $.session.compact({ trigger: 'manual', messages: conversation(), instructions: '[fast-compact] the plan' });
+    expect(result.messages?.some((m) => m.toolResults?.some((r) => r.text.includes('[fast-compact: cut ')))).toBe(true);
+  });
+
+  test('a second /fc while the first is running is refused', async ($, on) => {
+    world(on);
+    await $.command.run({ command: 'fc', args: '', ...COMMAND });
+    const again = await $.command.run({ command: 'fc', args: '', ...COMMAND });
+    expect(again.text).toBe('a compaction is already running');
+  });
+
+  test('a failure on its own compaction is a readable skip, never the summary', async ($, on) => {
+    world(on, { noSession: true });
+    const result = await $.session.compact({ trigger: 'manual', messages: conversation(), instructions: '[fast-compact]' });
+    expect(result.skip).toMatch(/^fast-compact failed \(throw: .*no session here/);
+    expect(result.skip).not.toContain('[object Object]');
+  });
+
+  test('a Jev endpoint that hangs: ranked newest first, within the budget', async ($, on) => {
+    const w = world(on, { env: { OPENROUTER_API_KEY: 'k' }, hang: true });
+    const pending = $.session.compact({ trigger: 'manual', messages: conversation(), instructions: '[fast-compact]' });
+    for (let i = 0; i < 6; i++) await w.clock.advance(7000);
+    const result = await pending;
+    expect(result.messages).toBeDefined();
+    const ledgerPath = [...w.files.keys()].find((p) => /\/ledger-\d{4}-\d{2}\.jsonl$/.test(p))!;
+    const ledger = JSON.parse(w.files.get(ledgerPath)!.trim());
+    expect(ledger.ranking).toBe('newest');
+    expect(ledger.jev.skipped).toMatch(/no answer|no time left/);
   });
 });

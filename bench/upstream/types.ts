@@ -1,3 +1,5 @@
+// From tamaratran/fast-jev-compaction at e3f262a (MIT, Copyright (c) 2025), unchanged:
+// the library as shipped, kept so the bench can measure it. Not used by the plugin.
 export type Role = 'user' | 'assistant';
 
 /**

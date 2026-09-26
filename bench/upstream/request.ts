@@ -1,3 +1,5 @@
+// From tamaratran/fast-jev-compaction at e3f262a (MIT, Copyright (c) 2025), unchanged:
+// the library as shipped, kept so the bench can measure it. Not used by the plugin.
 import type { JevAnswer, JevQuestions, JevResponse, JevState } from './types.js';
 
 export const SYSTEM_ONE_URL = 'https://api.typesafe.ai/v1/systemone';

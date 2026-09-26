@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { askAll, batchQuestions, JevError, parseResponse, type Transport } from '../../src/jev.js';
 import { redact, requestJson } from '../../src/redact.js';
 import { collectCalls, estimateTokens, fitState, goalOf } from '../../src/state.js';
-import { cutMiddle, isHostText, sample, wellFormed } from '../../src/text.js';
+import { cutMiddle, isHostText, sample, wasCut, wellFormed } from '../../src/text.js';
 import { big, session, user } from './fixtures.js';
 
 describe('text', () => {
@@ -124,5 +124,21 @@ describe('jev', () => {
     const out = await askAll(transport, { url: 'u', apiKey: 'k', model: 'm' }, {}, [batch]);
     expect([...out.scores.keys()].sort()).toEqual(['a', 'b', 'c', 'd']);
     expect(out.requests).toBe(2);
+  });
+});
+
+describe('review fixes', () => {
+  test('masks truncated private keys, JSON-quoted secrets and underscore-style keys', () => {
+    const key = ['-----BEGIN OPENSSH', 'PRIVATE KEY-----'].join(' ') + '\nb3BlbnNzaC1rZXktdjEAAAAA' + 'x'.repeat(200);
+    expect(redact(key).text).toBe('[REDACTED]');
+    expect(redact('{"password": "hunter2secret"}').text).toBe('{"password": "[REDACTED]"}');
+    const stripe = ['sk', 'live', 'x'.repeat(24)].join('_');
+    expect(redact(`key=${stripe}`).text).not.toContain(stripe);
+  });
+
+  test('only a whole marker counts as an earlier cut', () => {
+    expect(wasCut('grep "[fast-compact: cut " in the source')).toBe(false);
+    const real = cutMiddle('a'.repeat(5000), 1500, '/x/output-t1.txt', 'this output');
+    expect(wasCut(real)).toBe(true);
   });
 });

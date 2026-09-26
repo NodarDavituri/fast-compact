@@ -209,8 +209,10 @@ export const register: Register = (on, options) => {
       return { skip: why };
     }
 
+    // A key carries a tool_use_id and, for an input, the field name (an MCP tool's own):
+    // only safe characters reach the file name.
     const pathOf = (cut: Cut): string =>
-      `${dir}/${cut.kind}-${cut.kind === 'notice' ? `${stamp}-${cut.key}` : cut.key}.txt`;
+      `${dir}/${cut.kind}-${(cut.kind === 'notice' ? `${stamp}-${cut.key}` : cut.key).replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '_')}.txt`;
     const saved: Cut[] = [];
     await Promise.all(
       decision.cuts.map(async (cut) => {

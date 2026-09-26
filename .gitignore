@@ -4,3 +4,4 @@ dist
 demo/JevDemo/build
 bench/.cache/
 .claude/types/
+.claude-plugin/types/

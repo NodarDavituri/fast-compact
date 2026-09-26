@@ -261,7 +261,12 @@ if (flag('jev')) {
   summary.push(
     `Jev: ${jevTotals.model}, ${jevTotals.requests} requests (${jevTotals.cached} from cache), ${(jevTotals.inputTokens / 1e6).toFixed(2)}M input tokens, $${jevTotals.cost.toFixed(3)}; ${redactedTotal} credential-shaped strings masked; state stages ${[...jevTotals.stages].map(([k, v]) => `${k} ${v}`).join(', ')}.`,
   );
-  if (failures.length) summary.push(`Failed points (left out): ${failures.join('; ')}`);
+  // Details (point ids are session-id prefixes; error bodies can carry account ids) go to
+  // the console only, never into RESULTS.md.
+  if (failures.length) {
+    summary.push(`${failures.length} point(s) failed and were left out.`);
+    console.error(`failed points:\n  ${failures.join('\n  ')}`);
+  }
 }
 const report = [...summary, '', ...lines].join('\n');
 console.log(`\n${report}`);

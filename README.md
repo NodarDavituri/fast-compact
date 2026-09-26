@@ -78,7 +78,7 @@ claude plugin marketplace add NodarDavituri/fast-compact
 claude plugin install fast-compact@fast-compact
 ```
 
-Restart Claude Code (or run `/reload-plugins`) and type `/fc`.
+Restart Claude Code (or run `/reload-plugins`) and type `/fc`. The installer mentions options "not yet set" — that's fine: the defaults below apply until you change them.
 
 You can also keep the key in the plugin's own `apiKey` option (`/plugin configure fast-compact`); Claude Code stores it securely.
 

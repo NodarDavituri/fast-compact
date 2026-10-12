@@ -1,6 +1,6 @@
 {
   "name": "fast-compact",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "A fast, second compaction command for Claude Code: old tool output cut to its start and end, Jev keeping whole what is still needed.",
   "type": "module",

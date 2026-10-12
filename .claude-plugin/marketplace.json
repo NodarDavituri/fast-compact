@@ -7,7 +7,7 @@
       "name": "fast-compact",
       "source": "./",
       "description": "/fast-compact (and /fc): cut old tool output to its start and end in about a second, with Jev keeping whole what is still needed and every cut saved to a file.",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "license": "MIT"
     }
   ]

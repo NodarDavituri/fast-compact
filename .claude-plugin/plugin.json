@@ -1,6 +1,6 @@
 {
   "name": "fast-compact",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "/fast-compact (and /fc): cut old tool output to its start and end in about a second, with Jev keeping whole what is still needed and every cut saved to a file. Claude Code's own /compact is untouched.",
   "author": { "name": "Nodar Davituri", "url": "https://github.com/NodarDavituri" },
   "homepage": "https://github.com/NodarDavituri/fast-compact",

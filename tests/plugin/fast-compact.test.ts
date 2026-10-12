@@ -1,4 +1,4 @@
-import { describe, type Engine, expect, mock, test } from 'claude-code/testing';
+import { describe, type Engine, expect, mock, test, type TestOptions } from 'claude-code/testing';
 import type { On, SessionMessage } from 'claude-code';
 
 // The conversation a compaction runs over: a prompt, five long reads, then ten quick calls.
@@ -19,6 +19,8 @@ interface World {
   files: Map<string, string>;
   logs: string[];
   requests: { url: string; body: string }[];
+  /** Each line the plugin pinned under the prompt, undefined for a clear. */
+  status: (string | undefined)[];
 }
 
 function world(
@@ -26,7 +28,7 @@ function world(
   options: { env?: Record<string, string>; jev?: (body: string) => { status: number; text: string }; failWrite?: string; noSession?: boolean; hang?: boolean } = {},
 ): World {
   mock.env(on, { HOME: '/Users/tester', ...options.env });
-  const w: World = { clock: mock.clock(on, { now: 1_790_000_000_000 }), files: new Map(), logs: [], requests: [] };
+  const w: World = { clock: mock.clock(on, { now: 1_790_000_000_000 }), files: new Map(), logs: [], requests: [], status: [] };
   // Core's /compact, which the plugin schedules; its compaction is driven by the test itself.
   on('command.run', (_$, e) => ({ text: e.command === 'compact' ? 'Compacted' : `no /${e.command} here` }));
   on('session.id', () => (options.noSession ? { deny: 'no session here' } : { value: 'sess-1' }));
@@ -35,6 +37,12 @@ function world(
     w.logs.push(e.text);
     return { value: undefined };
   });
+  on('ui.status', (_$, e) => {
+    w.status.push(e.text);
+    return { value: undefined };
+  });
+  on('session.messages', () => ({ value: conversation() }));
+  on('session.measure', (_$, e) => ({ changed: e.changed }));
   on('fs.write', (_$, e) => {
     if (options.failWrite && e.path.includes(options.failWrite)) return { deny: 'EACCES' };
     w.files.set(e.path, e.text);
@@ -220,5 +228,76 @@ describe('/fc', () => {
     const ledger = JSON.parse(w.files.get(ledgerPath)!.trim());
     expect(ledger.ranking).toBe('newest');
     expect(ledger.jev.skipped).toMatch(/no answer|no time left/);
+  });
+});
+
+/** A test's plugin options: the test host takes `options`, which its TestOptions type does not declare yet. */
+const withOptions = (options: Record<string, unknown>): TestOptions => ({ options }) as unknown as TestOptions;
+const AUTO = withOptions({ autoCompact: true });
+const cutOf = (messages: readonly SessionMessage[] | undefined): boolean =>
+  messages?.some((m) => m.toolResults?.some((r) => r.text.includes('[fast-compact: cut '))) ?? false;
+const ledgerOf = (w: World) => JSON.parse(w.files.get([...w.files.keys()].find((p) => /\/ledger-\d{4}-\d{2}\.jsonl$/.test(p))!)!.trim());
+
+describe('autoCompact', () => {
+  test('auto-compaction is cut the way /fc cuts, every cut archived, the ledger saying auto', AUTO, async ($, on) => {
+    const w = world(on);
+    const result = await $.session.compact({ trigger: 'auto', messages: conversation() });
+    expect(cutOf(result.messages)).toBe(true);
+    expect(w.files.get('/Users/tester/.claude/fast-compact/sess-1/output-toolu_read0.txt')).toContain('// f0');
+    expect(ledgerOf(w)).toMatchObject({ trigger: 'auto', session: 'sess-1' });
+  });
+
+  test('cuts freeing under a fifth of the conversation: Claude Code summarises', AUTO, async ($, on) => {
+    world(on);
+    const talk: SessionMessage = { role: 'user', text: 'x'.repeat(400_000), toolUses: [] };
+    const result = await $.session.compact({ trigger: 'auto', messages: [talk, ...conversation()] });
+    expect(result.messages?.[0]?.text).toBe('core summary');
+  });
+
+  test('nothing old enough to cut: Claude Code summarises', AUTO, async ($, on) => {
+    world(on);
+    const result = await $.session.compact({ trigger: 'auto', messages: conversation().slice(-12) });
+    expect(result.messages?.[0]?.text).toBe('core summary');
+  });
+
+  test('a subagent’s auto-compaction is left to core', AUTO, async ($, on) => {
+    world(on);
+    const result = await $.session.compact({ trigger: 'auto', messages: conversation(), agentId: 'agent-1' });
+    expect(result.messages?.[0]?.text).toBe('core summary');
+  });
+
+  test('a failure falls back to the summary, never a skip that leaves the context full', AUTO, async ($, on) => {
+    world(on, { noSession: true });
+    const result = await $.session.compact({ trigger: 'auto', messages: conversation() });
+    expect(result.messages?.[0]?.text).toBe('core summary');
+  });
+});
+
+describe('meter', () => {
+  const MEASURE = { context: { window: 400_000, tokens: 100_000 }, rateLimits: [], changed: ['context' as const] };
+  const FILE = '/Users/tester/.claude/fast-compact/meter/sess-1';
+
+  test('statusline: after a turn the file holds the tokens /fc would free; a compaction clears it', withOptions({ meter: 'statusline' }), async ($, on) => {
+    const w = world(on);
+    await $.session.measure(MEASURE);
+    expect(Number(w.files.get(FILE))).toBeGreaterThan(2_000);
+    expect(w.requests).toHaveLength(0);
+    await fastCompact($, w);
+    expect(w.files.get(FILE)).toBe('');
+  });
+
+  test('prompt: a line under the prompt after a turn, cleared by a compaction', withOptions({ meter: 'prompt' }), async ($, on) => {
+    const w = world(on);
+    await $.session.measure(MEASURE);
+    expect(w.status.at(-1)).toMatch(/^\/fc would free ~[\d.]+k tokens \(4 old outputs\)$/);
+    await $.session.compact({ trigger: 'manual', messages: conversation() });
+    expect(w.status.at(-1)).toBeUndefined();
+  });
+
+  test('off by default: no file, no line', async ($, on) => {
+    const w = world(on);
+    await $.session.measure(MEASURE);
+    expect(w.files.has(FILE)).toBe(false);
+    expect(w.status).toHaveLength(0);
   });
 });

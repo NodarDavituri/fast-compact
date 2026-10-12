@@ -99,10 +99,33 @@ Change them with `/plugin configure fast-compact`, or under `pluginConfigs` in `
 | `cutInputs` | `true` | Also trim long old tool inputs |
 | `sendSamples` | `true` | Show Jev the first 200 and last 100 characters of each output it ranks |
 | `resumeSafe` | `true` | Keep the compaction when you `--resume` the session |
+| `autoCompact` | `false` | Cut instead of summarising when Claude Code compacts on its own ([below](#auto-compaction)) |
+| `meter` | `off` | Show what `/fc` would free: `prompt` or `statusline` ([below](#see-what-fc-would-free)) |
+
+## Auto-compaction
+
+With `autoCompact` on, Claude Code's own auto-compaction gets the `/fc` treatment: old tool output is cut, Jev keeps what's still needed, every cut is saved to a file. It takes about a second instead of a minute or more, and nothing is summarised away.
+
+When the cut would free less than a fifth of the conversation, Claude Code summarises as usual: with less, the context would stay near its limit and compact again a few turns later. The same happens if anything goes wrong. `/compact`, subagents and Claude Code's background precompute are never touched.
+
+Each run adds a ledger line with `"trigger":"auto"`.
+
+## See what /fc would free
+
+`meter` works out after each turn what `/fc` would free right now. It runs the same cut with the newest outputs kept whole instead of asking Jev, so it sends nothing anywhere and takes a few milliseconds. Jev keeps whole only what it rates as still needed, so `/fc` usually frees this much or more.
+
+- `prompt` pins a line under the prompt: `/fc would free ~15k tokens (10 old outputs)`.
+- `statusline` writes the token count to `~/.claude/fast-compact/meter/<session id>` (empty when there's less than 2k to free), for your [status line](https://code.claude.com/docs/en/statusline) command:
+
+```sh
+input=$(cat)
+freed=$(cat "$HOME/.claude/fast-compact/meter/$(echo "$input" | jq -r .session_id)" 2>/dev/null)
+if [ -n "$freed" ]; then printf '/fc −%sk' $((freed / 1000)); fi
+```
 
 ## Privacy: what leaves your machine
 
-**Sent to Jev, each time you run `/fc`:**
+**Sent to Jev, each time you run `/fc` (and on auto-compaction, with `autoCompact` on):**
 
 - your and Claude's messages (long ones shortened)
 - tool inputs (shortened)
@@ -115,6 +138,7 @@ Secrets that look like keys, tokens, passwords, private keys or URLs with passwo
 
 - the full text of every cut, in `~/.claude/fast-compact/<session>/` — next to where Claude Code already keeps your transcripts
 - one line per `/fc` (sizes, counts, cost) in `~/.claude/fast-compact/ledger-<year>-<month>.jsonl`
+- with `meter` set to `statusline`, one small file per session in `~/.claude/fast-compact/meter/`
 
 Nothing is deleted automatically. To clear sessions older than a month:
 
@@ -128,6 +152,7 @@ find ~/.claude/fast-compact -mindepth 1 -maxdepth 1 -type d -mtime +30 -exec rm 
 - **You'll see `/compact [fast-compact]` in the transcript.** Claude Code doesn't let a plugin run a compaction from its own command, so `/fc` runs the built-in `/compact` with a marker and answers it itself. Any `/compact` whose instructions start with `[fast-compact]` is handled by this plugin — including one you type yourself.
 - **It only shrinks tool output, tool input and notices.** If your conversation is mostly text, use `/compact`.
 - **`resumeSafe` has a small cost:** older messages lose Claude's hidden reasoning, and a message that held only an image is dropped. Text and tool calls stay.
+- **With `autoCompact`, the spinner can get stuck.** In Claude Code 2.1.296, after a plugin answers an auto-compaction, the spinner says "Running SessionStart hooks…" until the turn ends. Claude keeps working underneath; let the turn finish rather than pressing Esc.
 - **Jev gets up to 6 seconds per request.** If it's slower or silent, that run keeps the newest outputs whole instead.
 - **Sizes are counted in characters,** not tokens.
 - **The measurements come from one person's sessions.** Run the bench on your own: `bun bench/run.ts --jev`.

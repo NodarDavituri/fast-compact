@@ -10,7 +10,7 @@
  * applies), and a call is never removed: the transcript keeps its shape.
  */
 import { askAll, batchQuestions, type Answered, type JevConfig, neededQuestion, type Transport } from './jev.js';
-import { collectCalls, fitState, type Call } from './state.js';
+import { collectCalls, estimateTokens, fitState, type Call } from './state.js';
 import { cutEnd, cutMiddle, isHostText, wasCut } from './text.js';
 import type { Cut, Message, Options, ToolResult, ToolUse } from './types.js';
 
@@ -178,11 +178,26 @@ export async function decide(
  * anthropics/claude-code#95328, upstream #89). A message left with nothing to
  * write (a thinking block) is dropped; hidden reasoning and images do not
  * survive, text and tool calls do.
+ *
+ * Consecutive assistant messages, and consecutive user messages that only
+ * carry tool results, are merged into one. The engine writes each message
+ * it's handed as a turn of its own, so a parallel batch handed back as
+ * separate calls reaches the model with every call but the last one
+ * unanswered ("Tool result missing due to internal error"), and those results
+ * are lost.
  */
 export function fresh(messages: readonly Message[]): Message[] {
-  return messages
-    .map(({ handle: _handle, ...m }) => m)
-    .filter((m) => m.text.length > 0 || m.toolUses.length > 0 || (m.toolResults?.length ?? 0) > 0);
+  const out: Message[] = [];
+  for (const { handle: _handle, ...m } of messages) {
+    if (m.text.length === 0 && m.toolUses.length === 0 && !m.toolResults?.length) continue;
+    const last = out.at(-1);
+    if (last?.role === 'assistant' && m.role === 'assistant') {
+      out[out.length - 1] = { ...last, text: [last.text, m.text].filter(Boolean).join('\n\n'), toolUses: [...last.toolUses, ...m.toolUses] };
+    } else if (last?.role === 'user' && m.role === 'user' && !last.text && !m.text && last.toolResults?.length && m.toolResults?.length) {
+      out[out.length - 1] = { ...last, toolResults: [...last.toolResults, ...m.toolResults] };
+    } else out.push(m);
+  }
+  return out;
 }
 
 /** Characters of text, tool inputs and outputs, the measure of what a compaction freed. */
@@ -249,4 +264,29 @@ export function applyCuts(
     }
     return m;
   });
+}
+
+/** What a cut would free: characters, the tokens they come to, and the outputs cut. */
+export interface Estimate {
+  chars: number;
+  tokens: number;
+  outputs: number;
+}
+
+/**
+ * What /fc would free right now, worked out without asking Jev (the newest
+ * outputs kept whole). Jev keeps whole only what it rates as still needed,
+ * within the same budget, so /fc usually frees this much or more.
+ */
+// ponytail: markers are counted without their archive path (about 100 chars a cut); fine for an estimate
+export async function estimate(messages: readonly Message[], options: Options): Promise<Estimate> {
+  const { cuts } = await decide(messages, options, undefined);
+  if (cuts.length === 0) return { chars: 0, tokens: 0, outputs: 0 };
+  const chars = sizeOf(messages) - sizeOf(applyCuts(messages, cuts, () => '', options));
+  const originals = cuts.map((c) => c.original).join('\n');
+  return {
+    chars,
+    tokens: Math.round((estimateTokens(originals) * chars) / originals.length),
+    outputs: cuts.filter((c) => c.kind === 'output').length,
+  };
 }

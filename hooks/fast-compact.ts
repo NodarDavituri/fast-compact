@@ -2,14 +2,20 @@
  * The Claude Code side of fast-compact: `/fast-compact` (and `/fc`) cut old
  * tool output down to its start and end, with Jev choosing which outputs stay
  * whole, and save everything cut to a file named in its place. Claude Code's
- * own `/compact` and auto-compaction are left alone: this module's
- * `session.compact` hook acts only on the compaction its own command asked
- * for, and never hands one to the built-in summary.
+ * own `/compact` is left alone: this module's `session.compact` hook acts on
+ * the compaction its own command asked for, and never hands that one to the
+ * built-in summary. Auto-compaction is left alone too, unless `autoCompact` is
+ * on: then it is cut the same way when that frees enough, and summarised by
+ * Claude Code otherwise. With `meter` on, what /fc would free is shown after
+ * each turn.
  */
-import type { PluginOptions, Register } from 'claude-code';
-import { applyCuts, decide, fresh, sizeOf, type Decision, type JevAccess } from '../src/compact.js';
+import type { EngineInterface, PluginOptions, Register } from 'claude-code';
+import { applyCuts, decide, estimate, fresh, sizeOf, type Decision, type Estimate, type JevAccess } from '../src/compact.js';
 import { DEFAULT_MODEL, ENDPOINTS, type Provider } from '../src/jev.js';
 import { DEFAULT_OPTIONS, type Cut, type Message, type Options } from '../src/types.js';
+
+/** Where the meter shows what /fc would free: nowhere, a line under the prompt, or a file a status line reads. */
+type Meter = 'off' | 'prompt' | 'statusline';
 
 interface Settings {
   options: Options;
@@ -17,6 +23,8 @@ interface Settings {
   url: string;
   model: string;
   apiKey?: string;
+  autoCompact: boolean;
+  meter: Meter;
 }
 
 function numberOption(options: PluginOptions, key: string, fallback: number): number {
@@ -36,12 +44,15 @@ function stringOption(options: PluginOptions, key: string): string | undefined {
 
 export function settingsOf(options: PluginOptions): Settings {
   const provider: Provider = stringOption(options, 'provider') === 'typesafe' ? 'typesafe' : 'openrouter';
+  const meter = stringOption(options, 'meter');
   const d = DEFAULT_OPTIONS;
   return {
     provider,
     url: stringOption(options, 'baseUrl') ?? ENDPOINTS[provider],
     model: stringOption(options, 'model') ?? DEFAULT_MODEL,
     apiKey: stringOption(options, 'apiKey'),
+    autoCompact: booleanOption(options, 'autoCompact', false),
+    meter: meter === 'prompt' || meter === 'statusline' ? meter : 'off',
     options: {
       ...d,
       keepRecentCalls: Math.max(0, Math.floor(numberOption(options, 'keepRecentCalls', d.keepRecentCalls))),
@@ -118,6 +129,39 @@ function parts(text: string, size: number): string[] {
   return out.length > 0 ? out : [''];
 }
 
+/**
+ * An auto-compaction is answered with cuts only when they free at least this
+ * share of the conversation: with less, the context stays near Claude Code's
+ * threshold and it would compact again a few turns later, so its summary runs.
+ */
+const AUTO_MIN_FREED = 0.2;
+/** Under this many tokens, the meter shows nothing. */
+const METER_MIN_TOKENS = 2_000;
+
+/** Whether this is the main conversation's auto-compaction, and `autoCompact` gives it to this plugin. */
+function takesAuto(settings: Settings, e: { trigger: string; agentId?: string }): boolean {
+  return settings.autoCompact && e.trigger === 'auto' && !e.agentId;
+}
+
+/**
+ * Shows what /fc would free (`freed` undefined clears it): a line under the
+ * prompt, or the token count in ~/.claude/fast-compact/meter/<session id> for
+ * a status line command to read.
+ */
+// ponytail: one small meter file per session, never deleted ($.fs has no delete)
+async function showMeter($: EngineInterface, meter: Meter, freed: Estimate | undefined): Promise<void> {
+  try {
+    if (meter === 'prompt') {
+      $.ui.status(freed ? `/fc would free ~${kchars(freed.tokens)} tokens (${freed.outputs} old outputs)` : undefined);
+    } else if (meter === 'statusline') {
+      const home = (await $.env.get('HOME')) ?? '';
+      await $.fs.write(`${home}/.claude/fast-compact/meter/${await $.session.id()}`, freed ? String(freed.tokens) : '');
+    }
+  } catch {
+    // the meter is a convenience; it never gets in the way of the session
+  }
+}
+
 export const register: Register = (on, options) => {
   const settings = settingsOf(options);
   /** The /fc whose scheduled /compact has not settled yet. */
@@ -169,12 +213,29 @@ export const register: Register = (on, options) => {
     return { text: `compacting${focus ? ` (keeping: ${focus})` : ''}…` };
   });
 
+  // After each turn: what /fc would free now, worked out without Jev, so no request is made.
+  on('session.measure', async ($, e, next) => {
+    const result = await next(e);
+    if (settings.meter !== 'off') {
+      const freed = await $.session
+        .messages()
+        .then((messages) => estimate(messages as readonly Message[], settings.options))
+        .catch(() => undefined);
+      await showMeter($, settings.meter, freed && freed.tokens >= METER_MIN_TOKENS ? freed : undefined);
+    }
+    return result;
+  });
+
   on('session.compact', async ($, e, next) => {
+    // Any compaction changes what /fc could free; the next turn measures again.
+    if (!e.agentId && e.trigger !== 'precompute') await showMeter($, settings.meter, undefined);
     // Ours is the main conversation's manual or plugin compaction carrying the
-    // marker (the scheduled /compact arrives as `manual` in 2.1.283); auto,
-    // precompute and subagent compactions, and every unmarked one, pass on.
+    // marker (the scheduled /compact arrives as `manual` in 2.1.283), and its
+    // auto-compaction when `autoCompact` is on; precompute and subagent
+    // compactions, and every other one, pass on.
+    const auto = takesAuto(settings, e);
     const mainManual = !e.agentId && (e.trigger === 'plugin' || e.trigger === 'manual');
-    const focus = mainManual ? focusOf(e.instructions) : undefined;
+    const focus = auto ? '' : mainManual ? focusOf(e.instructions) : undefined;
     if (focus === undefined) return next(e);
     const messages = e.messages as readonly Message[];
     // $.clock.sleep counts against the hook's 10 s budget ($.http.fetch does
@@ -231,6 +292,10 @@ export const register: Register = (on, options) => {
       : undefined;
 
     const decision = await decide(messages, settings.options, jev, focus || undefined);
+    const before = sizeOf(messages);
+    const enough = (after: number): boolean => before - after >= AUTO_MIN_FREED * before;
+    // An auto-compaction the cuts would not shrink enough goes to Claude Code's summary.
+    if (auto && !enough(sizeOf(applyCuts(messages, decision.cuts, () => '', settings.options)))) return next(e);
     if (decision.cuts.length === 0) {
       const why = `nothing old enough and long enough to cut (the newest ${settings.options.keepRecentCalls} tool calls are kept as they are)`;
       report = why;
@@ -263,14 +328,15 @@ export const register: Register = (on, options) => {
     );
     const unsaved = decision.cuts.length - saved.length;
     if (saved.length === 0) {
+      if (auto) return next(e);
       report = `nothing cut: none of the ${unsaved} full texts could be saved under ${dir}/`;
       return { skip: 'the full texts could not be saved' };
     }
 
     const cut = applyCuts(messages, saved, whereOf, settings.options);
     const compacted = settings.options.resumeSafe ? fresh(cut) : cut;
-    const before = sizeOf(messages);
     const after = sizeOf(compacted);
+    if (auto && !enough(after)) return next(e);
     report = reportOf(decision, before, after, saved, dir) + (unsaved > 0 ? ` ${unsaved} left uncut: their full text could not be saved.` : '');
 
     // One ledger per month keeps each file far below the host's 4 MiB read limit.
@@ -278,6 +344,7 @@ export const register: Register = (on, options) => {
     const line = JSON.stringify({
       at: now,
       session: sessionId,
+      trigger: auto ? 'auto' : 'fc',
       before,
       after,
       outputs: saved.filter((c) => c.kind === 'output').length,
@@ -298,10 +365,13 @@ export const register: Register = (on, options) => {
       // the ledger is a convenience; a compaction never fails over it
     }
     return { messages: compacted };
-  }).catch((_$, _e, next) => {
+  }).catch((_$, e, next) => {
     // A failure on this plugin's own compaction answers a skip, never the
     // built-in summary; one on a compaction it passed on stands as it was.
+    // An auto-compaction it took goes to the summary: a skip would leave the
+    // context full.
     if (next.called) return undefined;
+    if (takesAuto(settings, e)) return next(e);
     const why = `failed (${next.error.kind}${next.error.message ? `: ${next.error.message}` : ''}); nothing was cut`;
     report = why;
     return { skip: `fast-compact ${why}` };

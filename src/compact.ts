@@ -10,7 +10,7 @@
  * applies), and a call is never removed: the transcript keeps its shape.
  */
 import { askAll, batchQuestions, type Answered, type JevConfig, neededQuestion, type Transport } from './jev.js';
-import { collectCalls, fitState, type Call } from './state.js';
+import { collectCalls, estimateTokens, fitState, type Call } from './state.js';
 import { cutEnd, cutMiddle, isHostText, wasCut } from './text.js';
 import type { Cut, Message, Options, ToolResult, ToolUse } from './types.js';
 
@@ -249,4 +249,29 @@ export function applyCuts(
     }
     return m;
   });
+}
+
+/** What a cut would free: characters, the tokens they come to, and the outputs cut. */
+export interface Estimate {
+  chars: number;
+  tokens: number;
+  outputs: number;
+}
+
+/**
+ * What /fc would free right now, worked out without asking Jev (the newest
+ * outputs kept whole). Jev keeps whole only what it rates as still needed,
+ * within the same budget, so /fc usually frees this much or more.
+ */
+// ponytail: markers are counted without their archive path (about 100 chars a cut); fine for an estimate
+export async function estimate(messages: readonly Message[], options: Options): Promise<Estimate> {
+  const { cuts } = await decide(messages, options, undefined);
+  if (cuts.length === 0) return { chars: 0, tokens: 0, outputs: 0 };
+  const chars = sizeOf(messages) - sizeOf(applyCuts(messages, cuts, () => '', options));
+  const originals = cuts.map((c) => c.original).join('\n');
+  return {
+    chars,
+    tokens: Math.round((estimateTokens(originals) * chars) / originals.length),
+    outputs: cuts.filter((c) => c.kind === 'output').length,
+  };
 }

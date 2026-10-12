@@ -72,6 +72,18 @@
       "title": "Keep the compaction across --resume",
       "description": "Hand messages back as new ones, so a resumed session loads the compacted history (older messages lose hidden reasoning and images; text and tool calls stay).",
       "default": true
+    },
+    "autoCompact": {
+      "type": "boolean",
+      "title": "Cut instead of summarising on auto-compaction",
+      "description": "When Claude Code compacts on its own, cut old tool output the way /fc does if that frees at least a fifth of the conversation; otherwise Claude Code summarises as usual.",
+      "default": false
+    },
+    "meter": {
+      "type": "string",
+      "title": "Show what /fc would free",
+      "description": "off (default), prompt (a line under the prompt after each turn) or statusline (the token count in ~/.claude/fast-compact/meter/<session id>, for your status line).",
+      "default": "off"
     }
   }
 }

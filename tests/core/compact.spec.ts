@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { applyCuts, chooseWhole, decide, plan, protectedFrom, sizeOf } from '../../src/compact.js';
+import { applyCuts, chooseWhole, decide, estimate, plan, protectedFrom, sizeOf } from '../../src/compact.js';
 import type { Transport } from '../../src/jev.js';
 import { CUT_MARK } from '../../src/text.js';
 import { DEFAULT_OPTIONS, type Cut, type Message } from '../../src/types.js';
@@ -171,5 +171,21 @@ describe('decide', () => {
     const d = await decide(messages, options, { transport, config, now });
     expect(d.ranking).toBe('newest');
     expect(d.jevSkipped).toContain('no valid answer');
+  });
+});
+
+describe('estimate', () => {
+  test('what /fc would free without Jev: the newest kept whole, the rest cut to cutTo', async () => {
+    const freed = await estimate(session(4, 10), options);
+    // four 6000-char reads, a quarter kept whole: three cut to about 1500 chars each
+    expect(freed.outputs).toBe(3);
+    expect(freed.chars).toBeGreaterThan(3 * 4000);
+    expect(freed.chars).toBeLessThan(3 * 4500);
+    expect(freed.tokens).toBeGreaterThan(freed.chars / 6);
+    expect(freed.tokens).toBeLessThan(freed.chars / 2);
+  });
+
+  test('nothing old enough: nothing to free', async () => {
+    expect(await estimate(session(3, 2), options)).toEqual({ chars: 0, tokens: 0, outputs: 0 });
   });
 });

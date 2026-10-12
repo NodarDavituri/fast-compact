@@ -82,6 +82,19 @@ Restart Claude Code (or run `/reload-plugins`) and type `/fc`. The installer men
 
 You can also keep the key in the plugin's own `apiKey` option (`/plugin configure fast-compact`); Claude Code stores it securely.
 
+### Updates
+
+Claude Code doesn't update plugins from this marketplace on its own unless you turn it on: run `/plugin`, open the **Marketplaces** tab, select fast-compact and choose **Enable auto-update**. New versions are then installed in the background and load in your next session.
+
+To update by hand:
+
+```sh
+claude plugin marketplace update fast-compact
+claude plugin update fast-compact@fast-compact
+```
+
+Then restart Claude Code or run `/reload-plugins`.
+
 ## Options
 
 Change them with `/plugin configure fast-compact`, or under `pluginConfigs` in `settings.json`.

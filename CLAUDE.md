@@ -18,6 +18,8 @@ bun run validate
 OPENROUTER_API_KEY=… bun bench/run.ts --jev [--write]
 ```
 
+A release bumps `version` in `.claude-plugin/plugin.json` (and `package.json` to match): installed copies update only when that version changes. The marketplace entry carries no version of its own, since `plugin.json` would silently win over it.
+
 The typecheck reads Claude Code's plugin API types from `.claude-plugin/types/` (gitignored), which Claude Code writes itself when a session loads this folder as a plugin; there is no command for it. The `/plugin-types` command the old `types` script called is gone (2.1.296), and `claude -p /plugin-types` sends it to the model as a prompt instead — in this repo the model then ran the script again, recursing.
 
 ## Host rules learned the hard way (Claude Code 2.1.283)

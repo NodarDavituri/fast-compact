@@ -13,5 +13,5 @@
     "jsxFactory": "h",
     "jsxFragmentFactory": "Fragment"
   },
-  "include": [".claude/types/claude-code.d.ts", "hooks", "src", "tests/plugin"]
+  "include": [".claude-plugin/types", "hooks", "src", "tests/plugin"]
 }

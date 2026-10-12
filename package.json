@@ -7,9 +7,8 @@
   "license": "MIT",
   "scripts": {
     "typecheck": "tsc -p tsconfig.json && tsc -p bench/tsconfig.json",
-    "test": "bun test tests/core && CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin test tests/plugin",
+    "test": "bun test tests/core && CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin test .",
     "validate": "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin validate .claude-plugin/plugin.json",
-    "types": "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude -p /plugin-types",
     "bench": "bun bench/run.ts"
   },
   "devDependencies": {

@@ -161,7 +161,6 @@ find ~/.claude/fast-compact -mindepth 1 -maxdepth 1 -type d -mtime +30 -exec rm 
 
 ```sh
 bun install
-bun run types        # Claude Code's plugin API types, into .claude/types
 bun run typecheck
 bun run test         # core tests, plus the plugin in Claude Code's own test host
 bun run validate
@@ -170,6 +169,7 @@ bun run validate
 - `src/` — the logic (no Node APIs and no dependencies: hooks run in their own environment)
 - `hooks/fast-compact.ts` — the Claude Code side
 - `tests/core`, `tests/plugin` — the tests
+- `.claude-plugin/types/` — Claude Code's plugin API types, which Claude Code writes when a session loads this folder as a plugin (gitignored; the typecheck reads them)
 - `bench/` — the replay bench behind the numbers above
 
 ## Credits

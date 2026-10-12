@@ -1,4 +1,4 @@
-import { describe, type Engine, expect, mock, test } from 'claude-code/testing';
+import { describe, type Engine, expect, mock, test, type TestOptions } from 'claude-code/testing';
 import type { On, SessionMessage } from 'claude-code';
 
 // The conversation a compaction runs over: a prompt, five long reads, then ten quick calls.
@@ -231,7 +231,9 @@ describe('/fc', () => {
   });
 });
 
-const AUTO = { options: { autoCompact: true } };
+/** A test's plugin options: the test host takes `options`, which its TestOptions type does not declare yet. */
+const withOptions = (options: Record<string, unknown>): TestOptions => ({ options }) as unknown as TestOptions;
+const AUTO = withOptions({ autoCompact: true });
 const cutOf = (messages: readonly SessionMessage[] | undefined): boolean =>
   messages?.some((m) => m.toolResults?.some((r) => r.text.includes('[fast-compact: cut '))) ?? false;
 const ledgerOf = (w: World) => JSON.parse(w.files.get([...w.files.keys()].find((p) => /\/ledger-\d{4}-\d{2}\.jsonl$/.test(p))!)!.trim());
@@ -275,7 +277,7 @@ describe('meter', () => {
   const MEASURE = { context: { window: 400_000, tokens: 100_000 }, rateLimits: [], changed: ['context' as const] };
   const FILE = '/Users/tester/.claude/fast-compact/meter/sess-1';
 
-  test('statusline: after a turn the file holds the tokens /fc would free; a compaction clears it', { options: { meter: 'statusline' } }, async ($, on) => {
+  test('statusline: after a turn the file holds the tokens /fc would free; a compaction clears it', withOptions({ meter: 'statusline' }), async ($, on) => {
     const w = world(on);
     await $.session.measure(MEASURE);
     expect(Number(w.files.get(FILE))).toBeGreaterThan(2_000);
@@ -284,7 +286,7 @@ describe('meter', () => {
     expect(w.files.get(FILE)).toBe('');
   });
 
-  test('prompt: a line under the prompt after a turn, cleared by a compaction', { options: { meter: 'prompt' } }, async ($, on) => {
+  test('prompt: a line under the prompt after a turn, cleared by a compaction', withOptions({ meter: 'prompt' }), async ($, on) => {
     const w = world(on);
     await $.session.measure(MEASURE);
     expect(w.status.at(-1)).toMatch(/^\/fc would free ~[\d.]+k tokens \(4 old outputs\)$/);

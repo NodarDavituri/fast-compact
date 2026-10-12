@@ -178,11 +178,26 @@ export async function decide(
  * anthropics/claude-code#95328, upstream #89). A message left with nothing to
  * write (a thinking block) is dropped; hidden reasoning and images do not
  * survive, text and tool calls do.
+ *
+ * Consecutive assistant messages, and consecutive user messages that only
+ * carry tool results, are merged into one. The engine writes each message
+ * it's handed as a turn of its own, so a parallel batch handed back as
+ * separate calls reaches the model with every call but the last one
+ * unanswered ("Tool result missing due to internal error"), and those results
+ * are lost.
  */
 export function fresh(messages: readonly Message[]): Message[] {
-  return messages
-    .map(({ handle: _handle, ...m }) => m)
-    .filter((m) => m.text.length > 0 || m.toolUses.length > 0 || (m.toolResults?.length ?? 0) > 0);
+  const out: Message[] = [];
+  for (const { handle: _handle, ...m } of messages) {
+    if (m.text.length === 0 && m.toolUses.length === 0 && !m.toolResults?.length) continue;
+    const last = out.at(-1);
+    if (last?.role === 'assistant' && m.role === 'assistant') {
+      out[out.length - 1] = { ...last, text: [last.text, m.text].filter(Boolean).join('\n\n'), toolUses: [...last.toolUses, ...m.toolUses] };
+    } else if (last?.role === 'user' && m.role === 'user' && !last.text && !m.text && last.toolResults?.length && m.toolResults?.length) {
+      out[out.length - 1] = { ...last, toolResults: [...last.toolResults, ...m.toolResults] };
+    } else out.push(m);
+  }
+  return out;
 }
 
 /** Characters of text, tool inputs and outputs, the measure of what a compaction freed. */

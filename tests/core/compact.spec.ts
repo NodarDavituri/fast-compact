@@ -1,9 +1,9 @@
 import { describe, expect, test } from 'bun:test';
-import { applyCuts, chooseWhole, decide, estimate, plan, protectedFrom, sizeOf } from '../../src/compact.js';
+import { applyCuts, chooseWhole, decide, estimate, fresh, plan, protectedFrom, sizeOf } from '../../src/compact.js';
 import type { Transport } from '../../src/jev.js';
 import { CUT_MARK } from '../../src/text.js';
 import { DEFAULT_OPTIONS, type Cut, type Message } from '../../src/types.js';
-import { big, call, session, user } from './fixtures.js';
+import { assistant, big, call, session, user } from './fixtures.js';
 
 const options = DEFAULT_OPTIONS;
 const pathOf = (cut: Cut): string => `/archive/${cut.kind}-${cut.key}.txt`;
@@ -122,6 +122,32 @@ function fakeTransport(answer: (questions: Record<string, unknown>) => { status:
     sleep: async () => {},
   };
 }
+
+describe('fresh', () => {
+  test('a parallel batch comes back as one call message and one result message, without handles', () => {
+    const [a1, r1] = call('Bash', { command: 'cat a' }, 'A');
+    const [a2, r2] = call('Bash', { command: 'cat b' }, 'B');
+    const [a3, r3] = call('Bash', { command: 'cat c' }, 'C');
+    const out = fresh([user('go'), assistant('reading both'), a1!, a2!, r1!, r2!, a3!, r3!, assistant('done')]);
+    expect(out.map((m) => [m.role, m.toolUses.length, m.toolResults?.length ?? 0])).toEqual([
+      ['user', 0, 0],
+      ['assistant', 2, 0],
+      ['user', 0, 2],
+      ['assistant', 1, 0],
+      ['user', 0, 1],
+      ['assistant', 0, 0],
+    ]);
+    expect(out[1]!.text).toBe('reading both');
+    expect(out[2]!.toolResults!.map((r) => r.text)).toEqual(['A', 'B']);
+    expect(out.every((m) => m.handle === undefined)).toBe(true);
+  });
+
+  test('one call at a time keeps every message; a user text is never merged', () => {
+    const messages = [user('go'), ...session(0, 3), user('next')];
+    expect(fresh(messages)).toHaveLength(messages.length);
+    expect(fresh([user('a'), user('b')])).toHaveLength(2);
+  });
+});
 
 describe('decide', () => {
   const messages = session(5, 10, 8000);

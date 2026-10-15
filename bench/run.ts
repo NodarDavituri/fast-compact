@@ -146,7 +146,7 @@ for (const point of scored) {
     rows.push({
       point: point.id,
       id: c.tool_use_id,
-      project: point.project.replace(/^-Users-[^-]+-localdev-/, ''),
+      project: point.project.replace(/^-(?:Users|home)-[^-]+-/, ''),
       tool: c.tool,
       chars: c.resultChars,
       isError: c.isError,

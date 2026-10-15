@@ -11,5 +11,5 @@
     "skipLibCheck": true,
     "allowImportingTsExtensions": false
   },
-  "include": ["./*.ts", "./upstream/*.ts", "../src/**/*.ts", "../tests/core/**/*.ts"]
+  "include": ["./*.ts", "./upstream/*.ts", "../src/**/*.ts", "../tests/core/**/*.ts", "../.claude-plugin/types"]
 }

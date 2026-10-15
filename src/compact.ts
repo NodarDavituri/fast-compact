@@ -11,7 +11,7 @@
  */
 import { askAll, batchQuestions, type Answered, type JevConfig, neededQuestion, type Transport } from './jev.js';
 import { collectCalls, estimateTokens, fitState, type Call } from './state.js';
-import { cutEnd, cutMiddle, isHostText, wasCut } from './text.js';
+import { cutChars, cutEnd, cutMiddle, isHostText, wasCut } from './text.js';
 import type { Cut, Message, Options, ToolResult, ToolUse } from './types.js';
 
 export interface Plan {
@@ -19,6 +19,12 @@ export interface Plan {
   protectedFrom: number;
   calls: Call[];
   outputs: Call[];
+  /**
+   * The size before cutting of old outputs an earlier compaction cut, counted
+   * into the `keepWhole` budget: without it each /fc would keep a quarter of
+   * what the last one kept whole, and cut the rest.
+   */
+  cutBefore: number;
   inputs: { call: Call; field: string; text: string }[];
   notices: { index: number; text: string }[];
 }
@@ -42,6 +48,10 @@ export function plan(messages: readonly Message[], options: Options): Plan {
   const calls = collectCalls(messages);
   const old = calls.filter((c) => c.callIndex < from && c.resultIndex < from);
   const outputs = old.filter((c) => c.output.length > slack(options.cutTo) && !wasCut(c.output));
+  const cutBefore = old.reduce((n, c) => {
+    const taken = cutChars(c.output);
+    return taken > 0 ? n + c.output.length + taken : n;
+  }, 0);
   const inputs: Plan['inputs'] = [];
   if (options.cutInputs) {
     for (const call of old) {
@@ -59,7 +69,7 @@ export function plan(messages: readonly Message[], options: Options): Plan {
       notices.push({ index, text: m.text });
     }
   });
-  return { protectedFrom: from, calls, outputs, inputs, notices };
+  return { protectedFrom: from, calls, outputs, cutBefore, inputs, notices };
 }
 
 export type Ranking = 'jev' | 'newest';
@@ -67,14 +77,16 @@ export type Ranking = 'jev' | 'newest';
 /**
  * The outputs kept whole: in Jev's order (only those at or above
  * `minKeepScore`), or newest first without Jev, while the characters kept
- * beyond the cut stay within `keepWhole` of the old outputs' total.
+ * beyond the cut stay within `keepWhole` of the old outputs' total (with
+ * `cutBefore`, the old outputs earlier compactions cut, at their full size).
  */
 export function chooseWhole(
   outputs: readonly Call[],
   scores: ReadonlyMap<string, number> | undefined,
   options: Options,
+  cutBefore = 0,
 ): Set<string> {
-  const total = outputs.reduce((n, c) => n + c.output.length, 0);
+  const total = outputs.reduce((n, c) => n + c.output.length, cutBefore);
   let left = options.keepWhole * total;
   const order = scores
     ? outputs
@@ -129,12 +141,13 @@ export interface JevAccess {
 /**
  * Plans the cut and, when there are outputs to rank and Jev is reachable,
  * asks it which to keep whole. Jev failing never fails the compaction: the
- * outputs are ranked newest first instead, and `jevSkipped` says why.
+ * outputs are ranked newest first instead, and `jevSkipped` says why. A
+ * string in place of `jev` says why Jev is not asked at all.
  */
 export async function decide(
   messages: readonly Message[],
   options: Options,
-  jev: JevAccess | undefined,
+  jev: JevAccess | string | undefined,
   focus?: string,
 ): Promise<Decision> {
   const p = plan(messages, options);
@@ -142,6 +155,7 @@ export async function decide(
   let jevRun: Decision['jev'];
   let jevSkipped: string | undefined;
   if (p.outputs.length === 0) jevSkipped = 'no old outputs to rank';
+  else if (typeof jev === 'string') jevSkipped = jev;
   else if (!jev) jevSkipped = 'no Jev key';
   else {
     try {
@@ -160,7 +174,7 @@ export async function decide(
       jevSkipped = error instanceof Error ? error.message : String(error);
     }
   }
-  const whole = chooseWhole(p.outputs, scores, options);
+  const whole = chooseWhole(p.outputs, scores, options, p.cutBefore);
   return {
     plan: p,
     whole,
@@ -196,6 +210,34 @@ export function fresh(messages: readonly Message[]): Message[] {
     } else if (last?.role === 'user' && m.role === 'user' && !last.text && !m.text && last.toolResults?.length && m.toolResults?.length) {
       out[out.length - 1] = { ...last, toolResults: [...last.toolResults, ...m.toolResults] };
     } else out.push(m);
+  }
+  return out;
+}
+
+const resultsOnly = (m: Message): boolean => m.role === 'user' && !m.text && !!m.toolResults?.length;
+
+/**
+ * With handles kept (`resumeSafe` off): a turn (its assistant messages, then
+ * the result-only user messages answering them) is merged as `fresh` merges
+ * it when a run of two or more of either holds a rebuilt message, since the
+ * engine writes a handle-less message as a turn of its own and would split a
+ * parallel batch. Every other message keeps its handle.
+ */
+export function freshBatches(messages: readonly Message[]): Message[] {
+  const split = (run: readonly Message[]): boolean => run.length > 1 && run.some((m) => m.handle === undefined);
+  const out: Message[] = [];
+  for (let i = 0; i < messages.length; ) {
+    let j = i;
+    while (j < messages.length && messages[j]!.role === 'assistant') j++;
+    const calls = j;
+    while (j < messages.length && resultsOnly(messages[j]!)) j++;
+    if (j === i) {
+      out.push(messages[i++]!);
+      continue;
+    }
+    const turn = messages.slice(i, j);
+    out.push(...(split(messages.slice(i, calls)) || split(messages.slice(calls, j)) ? fresh(turn) : turn));
+    i = j;
   }
   return out;
 }
@@ -264,6 +306,12 @@ export function applyCuts(
     }
     return m;
   });
+}
+
+/** The most a cut could free in characters: every candidate cut, nothing kept whole (no Jev asked). */
+export function mostFreed(messages: readonly Message[], options: Options): number {
+  const cuts = cutsOf(plan(messages, options), new Set());
+  return cuts.length === 0 ? 0 : sizeOf(messages) - sizeOf(applyCuts(messages, cuts, () => '', options));
 }
 
 /** What a cut would free: characters, the tokens they come to, and the outputs cut. */

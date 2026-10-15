@@ -1,25 +1,29 @@
 /**
  * The Claude Code side of fast-compact: `/fast-compact` (and `/fc`) cut old
- * tool output down to its start and end, with Jev choosing which outputs stay
- * whole, and save everything cut to a file named in its place. Claude Code's
- * own `/compact` is left alone: this module's `session.compact` hook acts on
- * the compaction its own command asked for, and never hands that one to the
- * built-in summary. Auto-compaction is left alone too, unless `autoCompact` is
- * on: then it is cut the same way when that frees enough, and summarised by
- * Claude Code otherwise. With `meter` on, what /fc would free is shown after
- * each turn.
+ * tool output down to its start and end, Jev (when a key is set and
+ * `provider` is not `none`) choosing which outputs stay whole, and save
+ * everything cut to a file named in its place. Claude Code's own `/compact` is
+ * left alone: this module's `session.compact` hook acts on the compaction its
+ * own command asked for, and never hands that one to the built-in summary.
+ * Auto-compaction is left alone too, unless `autoCompact` is on: then it is cut
+ * the same way when that frees enough, and summarised by Claude Code
+ * otherwise. Unless `meter` is off, what /fc would free is shown after each
+ * turn.
  */
 import type { EngineInterface, PluginOptions, Register } from 'claude-code';
-import { applyCuts, decide, estimate, fresh, sizeOf, type Decision, type Estimate, type JevAccess } from '../src/compact.js';
+import { applyCuts, decide, estimate, fresh, freshBatches, mostFreed, sizeOf, type Decision, type Estimate, type JevAccess } from '../src/compact.js';
 import { DEFAULT_MODEL, ENDPOINTS, type Provider } from '../src/jev.js';
 import { DEFAULT_OPTIONS, type Cut, type Message, type Options } from '../src/types.js';
 
-/** Where the meter shows what /fc would free: nowhere, a line under the prompt, or a file a status line reads. */
-type Meter = 'off' | 'prompt' | 'statusline';
+/** Where the meter shows what /fc would free: nowhere, a line under the prompt, a file a status line reads, or both. */
+type Meter = 'off' | 'prompt' | 'statusline' | 'both';
 
 interface Settings {
   options: Options;
-  provider: Provider;
+  /** `none` never asks Jev, even with a key set: the newest outputs are kept whole and nothing is sent. */
+  provider: Provider | 'none';
+  /** Why `provider` is `none` when it was not set to it: a value this plugin does not know. */
+  providerNote?: string;
   url: string;
   model: string;
   apiKey?: string;
@@ -43,16 +47,19 @@ function stringOption(options: PluginOptions, key: string): string | undefined {
 }
 
 export function settingsOf(options: PluginOptions): Settings {
-  const provider: Provider = stringOption(options, 'provider') === 'typesafe' ? 'typesafe' : 'openrouter';
-  const meter = stringOption(options, 'meter');
+  // Anything but a known provider sends nothing: a mistyped `none` must not reach OpenRouter.
+  const named = stringOption(options, 'provider')?.toLowerCase();
+  const provider = named === undefined || named === 'openrouter' ? 'openrouter' : named === 'typesafe' ? 'typesafe' : 'none';
+  const meter = stringOption(options, 'meter')?.toLowerCase();
   const d = DEFAULT_OPTIONS;
   return {
     provider,
-    url: stringOption(options, 'baseUrl') ?? ENDPOINTS[provider],
+    providerNote: provider === 'none' && named !== 'none' && named !== 'off' ? `unknown provider "${named}"` : undefined,
+    url: stringOption(options, 'baseUrl') ?? (provider === 'none' ? '' : ENDPOINTS[provider]),
     model: stringOption(options, 'model') ?? DEFAULT_MODEL,
     apiKey: stringOption(options, 'apiKey'),
     autoCompact: booleanOption(options, 'autoCompact', false),
-    meter: meter === 'prompt' || meter === 'statusline' ? meter : 'off',
+    meter: meter === 'off' || meter === 'statusline' || meter === 'both' ? meter : 'prompt',
     options: {
       ...d,
       keepRecentCalls: Math.max(0, Math.floor(numberOption(options, 'keepRecentCalls', d.keepRecentCalls))),
@@ -77,13 +84,14 @@ function kchars(n: number): string {
 /** The one-line account the person sees under the command. */
 export function reportOf(decision: Decision, before: number, after: number, cuts: readonly Cut[], dir: string): string {
   const count = (kind: Cut['kind']): number => cuts.filter((c) => c.kind === kind).length;
+  const cut = (kind: Cut['kind']): string => `${count(kind)} ${kind}${count(kind) === 1 ? '' : 's'} cut`;
   const parts = [
-    `${count('output')} outputs cut`,
+    cut('output'),
     decision.whole.size > 0
       ? `${decision.whole.size} kept whole ${decision.ranking === 'jev' ? 'on Jev’s ranking' : 'as the newest'}`
       : '',
-    count('input') > 0 ? `${count('input')} inputs cut` : '',
-    count('notice') > 0 ? `${count('notice')} notices cut` : '',
+    count('input') > 0 ? cut('input') : '',
+    count('notice') > 0 ? cut('notice') : '',
   ].filter(Boolean);
   const jev = decision.jev
     ? `Jev ${decision.jev.model || 'answered'}: ${decision.jev.requests} request${decision.jev.requests === 1 ? '' : 's'}, ${(decision.jev.ms / 1000).toFixed(1)} s, $${decision.jev.cost.toFixed(4)}`
@@ -116,6 +124,13 @@ const BUDGET_RESERVE_MS = 2_500;
 /** Characters per archive file: at most 3 MB of UTF-8 whatever the text (the host refuses writes over 4 MiB). */
 const PART_CHARS = 1_000_000;
 
+/** A short, stable hash of `text` (FNV-1a, 8 hex digits). */
+function hashOf(text: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) h = Math.imul(h ^ text.charCodeAt(i), 0x01000193);
+  return (h >>> 0).toString(16).padStart(8, '0');
+}
+
 /** `text` in pieces of at most `size` characters, never splitting a surrogate pair. */
 function parts(text: string, size: number): string[] {
   const out: string[] = [];
@@ -137,23 +152,37 @@ function parts(text: string, size: number): string[] {
 const AUTO_MIN_FREED = 0.2;
 /** Under this many tokens, the meter shows nothing. */
 const METER_MIN_TOKENS = 2_000;
+/** The meter's line says how to hide it this many times a session, then drops the hint. */
+const METER_HINTS = 3;
 
 /** Whether this is the main conversation's auto-compaction, and `autoCompact` gives it to this plugin. */
 function takesAuto(settings: Settings, e: { trigger: string; agentId?: string }): boolean {
   return settings.autoCompact && e.trigger === 'auto' && !e.agentId;
 }
 
+/** What the log says when the compaction /fc scheduled never reached this plugin, after which /fc is off for the session. */
+export const MISSED =
+  'the compaction did not reach fast-compact, so Claude Code ran its own /compact instead and nothing was cut by this plugin. ' +
+  'Where an organization manages Claude Code, plugins you install yourself get no compaction hooks; /fc is off for this session.';
+
+/** The meter's line under the prompt, kept short: what /fc would free, its share of the window, and (with `hint`) how to hide it. */
+export function meterLine(freed: Estimate, window?: number, hint = true): string {
+  const share = window ? Math.round((100 * freed.tokens) / window) : 0;
+  return `/fc frees ~${kchars(freed.tokens)} tokens${share > 0 ? ` (${share}%)` : ''}${hint ? ' · hide: /plugin configure fast-compact → meter' : ''}`;
+}
+
 /**
  * Shows what /fc would free (`freed` undefined clears it): a line under the
- * prompt, or the token count in ~/.claude/fast-compact/meter/<session id> for
- * a status line command to read.
+ * prompt, the token count in ~/.claude/fast-compact/meter/<session id> for a
+ * status line command to read, or both.
  */
 // ponytail: one small meter file per session, never deleted ($.fs has no delete)
-async function showMeter($: EngineInterface, meter: Meter, freed: Estimate | undefined): Promise<void> {
+async function showMeter($: EngineInterface, meter: Meter, freed: Estimate | undefined, window?: number, hint?: boolean): Promise<void> {
   try {
-    if (meter === 'prompt') {
-      $.ui.status(freed ? `/fc would free ~${kchars(freed.tokens)} tokens (${freed.outputs} old outputs)` : undefined);
-    } else if (meter === 'statusline') {
+    if (meter === 'prompt' || meter === 'both') {
+      $.ui.status(freed ? meterLine(freed, window, hint) : undefined);
+    }
+    if (meter === 'statusline' || meter === 'both') {
       const home = (await $.env.get('HOME')) ?? '';
       await $.fs.write(`${home}/.claude/fast-compact/meter/${await $.session.id()}`, freed ? String(freed.tokens) : '');
     }
@@ -168,17 +197,21 @@ export const register: Register = (on, options) => {
   let running: { at: number } | undefined;
   /** What the last compaction did, logged once the /compact it rode on has finished (a log line written during a compaction is lost with the screen). */
   let report: string | undefined;
+  /** A /fc's compaction ran without reaching this plugin (an organization-managed Claude Code): /fc is refused and the meter hidden from then on. */
+  let missed = false;
+  /** Meter lines shown so far, the first METER_HINTS saying how to hide it. */
+  let lines = 0;
 
   on('session.start', async ($, e, next) => {
     const started = await next(e);
     await $.command.register({
       name: 'fast-compact',
-      description: 'Cut old tool output to its start and end (Jev keeps what is still needed); /compact is untouched',
+      description: 'Cut old tool output to its start and end, every cut saved to a file; /compact is untouched',
       argumentHint: '[what to keep]',
     });
     await $.command.register({
       name: 'fc',
-      description: 'fast-compact: cut old tool output, Jev keeps what is still needed',
+      description: 'fast-compact: cut old tool output to its start and end, every cut saved',
       argumentHint: '[what to keep]',
     });
     return started;
@@ -190,6 +223,7 @@ export const register: Register = (on, options) => {
   // the moment after it returns; the session.compact hook below answers it.
   on('command.run', async ($, e, next) => {
     if (e.command !== 'fast-compact' && e.command !== 'fc') return next(e);
+    if (missed) return { text: 'off for this session: its compaction did not reach this plugin last time (see the line above)' };
     const now = await $.clock.now();
     if (running && now - running.at < STUCK_MS) return { text: 'a compaction is already running' };
     const focus = e.args.trim();
@@ -200,7 +234,8 @@ export const register: Register = (on, options) => {
       $.command
         .run({ command: 'compact', args: markerOf(focus) })
         .then(() => {
-          $.ui.log(report ?? 'the compaction did not reach this plugin; nothing was cut');
+          if (report === undefined) missed = true;
+          $.ui.log(report ?? MISSED);
         })
         .catch((error: unknown) => {
           $.ui.log(`could not compact (${error instanceof Error ? error.message : String(error)})`);
@@ -213,15 +248,20 @@ export const register: Register = (on, options) => {
     return { text: `compacting${focus ? ` (keeping: ${focus})` : ''}…` };
   });
 
-  // After each turn: what /fc would free now, worked out without Jev, so no request is made.
+  // After each turn: what /fc would free now, worked out without Jev, so no
+  // request is made. A measurement where only the rate limits or the cost moved
+  // leaves the line as it is, sparing a read of the whole transcript.
   on('session.measure', async ($, e, next) => {
     const result = await next(e);
-    if (settings.meter !== 'off') {
+    if (settings.meter !== 'off' && missed) await showMeter($, settings.meter, undefined);
+    else if (settings.meter !== 'off' && e.changed.includes('context')) {
       const freed = await $.session
         .messages()
         .then((messages) => estimate(messages as readonly Message[], settings.options))
         .catch(() => undefined);
-      await showMeter($, settings.meter, freed && freed.tokens >= METER_MIN_TOKENS ? freed : undefined);
+      const shown = freed && freed.tokens >= METER_MIN_TOKENS ? freed : undefined;
+      await showMeter($, settings.meter, shown, e.context.window, lines < METER_HINTS);
+      if (shown) lines++;
     }
     return result;
   });
@@ -249,14 +289,15 @@ export const register: Register = (on, options) => {
     const now = new Date(await $.clock.now()).toISOString();
     const stamp = now.replace(/[-:]/g, '').slice(0, 15);
 
-    let apiKey = settings.apiKey;
-    if (!apiKey) {
+    const off = settings.provider === 'none';
+    let apiKey = off ? undefined : settings.apiKey;
+    if (!apiKey && !off) {
       apiKey =
         settings.provider === 'typesafe'
           ? await $.env.get('TYPESAFE_API_KEY')
           : await $.env.get('OPENROUTER_API_KEY');
     }
-    if (!apiKey) {
+    if (!apiKey && !off) {
       const env = (await $.settings.read())['env'];
       const name = settings.provider === 'typesafe' ? 'TYPESAFE_API_KEY' : 'OPENROUTER_API_KEY';
       const value = env && typeof env === 'object' ? (env as Record<string, unknown>)[name] : undefined;
@@ -291,9 +332,11 @@ export const register: Register = (on, options) => {
         }
       : undefined;
 
-    const decision = await decide(messages, settings.options, jev, focus || undefined);
     const before = sizeOf(messages);
     const enough = (after: number): boolean => before - after >= AUTO_MIN_FREED * before;
+    // An auto-compaction that even cutting everything would not shrink enough goes to the summary before Jev is asked.
+    if (auto && !enough(before - mostFreed(messages, settings.options))) return next(e);
+    const decision = await decide(messages, settings.options, off ? (settings.providerNote ?? 'provider none') : jev, focus || undefined);
     // An auto-compaction the cuts would not shrink enough goes to Claude Code's summary.
     if (auto && !enough(sizeOf(applyCuts(messages, decision.cuts, () => '', settings.options)))) return next(e);
     if (decision.cuts.length === 0) {
@@ -303,9 +346,13 @@ export const register: Register = (on, options) => {
     }
 
     // A key carries a tool_use_id and, for an input, the field name (an MCP
-    // tool's own): only safe characters reach the file name.
-    const pathOf = (cut: Cut): string =>
-      `${dir}/${cut.kind}-${(cut.kind === 'notice' ? `${stamp}-${cut.key}` : cut.key).replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '_')}.txt`;
+    // tool's own): only safe characters reach the file name, and a key that
+    // had others gets a hash of itself, so `a/b` and `a_b` never share a file.
+    const pathOf = (cut: Cut): string => {
+      const key = cut.kind === 'notice' ? `${stamp}-${cut.key}` : cut.key;
+      const safe = key.replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '_');
+      return `${dir}/${cut.kind}-${safe === key ? safe : `${safe}-${hashOf(key)}`}.txt`;
+    };
     const partsOf = new Map<Cut, number>();
     const whereOf = (cut: Cut): string => {
       const n = partsOf.get(cut) ?? 1;
@@ -334,7 +381,7 @@ export const register: Register = (on, options) => {
     }
 
     const cut = applyCuts(messages, saved, whereOf, settings.options);
-    const compacted = settings.options.resumeSafe ? fresh(cut) : cut;
+    const compacted = settings.options.resumeSafe ? fresh(cut) : freshBatches(cut);
     const after = sizeOf(compacted);
     if (auto && !enough(after)) return next(e);
     report = reportOf(decision, before, after, saved, dir) + (unsaved > 0 ? ` ${unsaved} left uncut: their full text could not be saved.` : '');

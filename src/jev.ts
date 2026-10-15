@@ -156,10 +156,13 @@ export async function askAll(
 ): Promise<Answered> {
   const out: Answered = { scores: new Map(), requests: 0, inputTokens: 0, cost: 0, model: '', redacted: 0 };
   const retries = config.retries ?? 2;
+  // Once one batch has failed the answer is lost anyway: the others send nothing more, retries included.
+  let failed = false;
   const one = async (questions: Record<string, object>): Promise<void> => {
     const names = Object.keys(questions);
     const { body, redacted } = requestJson({ model: config.model, state, questions });
     for (let attempt = 0; ; attempt++) {
+      if (failed) return;
       let response: { status: number; text: string };
       try {
         response = await transport.post(
@@ -202,7 +205,6 @@ export async function askAll(
     }
   };
   const queue = [...batches];
-  let failed = false;
   const workers = Array.from({ length: Math.min(config.concurrency ?? 4, queue.length) }, async () => {
     for (let next = queue.shift(); next && !failed; next = queue.shift()) {
       try {

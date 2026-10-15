@@ -26,6 +26,14 @@ export function wasCut(text: string): boolean {
   return CUT_RE.test(text);
 }
 
+const CUT_CHARS_RE = /\n\[fast-compact: cut (\d+) chars from the middle of [^\]\n]*?; the full text is in [^\]\n]+\]/;
+
+/** The characters an earlier cut took from the middle of `text` (0 when it holds no whole marker). */
+export function cutChars(text: string): number {
+  const match = CUT_CHARS_RE.exec(text);
+  return match ? Number(match[1]) : 0;
+}
+
 /**
  * Replaces an unpaired surrogate half with U+FFFD (what `toWellFormed` does,
  * which the hooks environment may not have).

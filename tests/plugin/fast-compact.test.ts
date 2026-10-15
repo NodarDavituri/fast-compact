@@ -1,4 +1,4 @@
-import { describe, type Engine, expect, mock, test, type TestOptions } from 'claude-code/testing';
+import { describe, type Engine, expect, mock, test } from 'claude-code/testing';
 import type { On, SessionMessage } from 'claude-code';
 
 // The conversation a compaction runs over: a prompt, five long reads, then ten quick calls.
@@ -25,7 +25,15 @@ interface World {
 
 function world(
   on: On,
-  options: { env?: Record<string, string>; jev?: (body: string) => { status: number; text: string }; failWrite?: string; noSession?: boolean; hang?: boolean } = {},
+  options: {
+    env?: Record<string, string>;
+    jev?: (body: string) => { status: number; text: string };
+    failWrite?: string;
+    noSession?: boolean;
+    hang?: boolean;
+    /** What `$.session.messages()` answers (the meter's transcript); `conversation()` by default. */
+    messages?: () => SessionMessage[];
+  } = {},
 ): World {
   mock.env(on, { HOME: '/Users/tester', ...options.env });
   const w: World = { clock: mock.clock(on, { now: 1_790_000_000_000 }), files: new Map(), logs: [], requests: [], status: [] };
@@ -41,7 +49,7 @@ function world(
     w.status.push(e.text);
     return { value: undefined };
   });
-  on('session.messages', () => ({ value: conversation() }));
+  on('session.messages', () => ({ value: (options.messages ?? conversation)() }));
   on('session.measure', (_$, e) => ({ changed: e.changed }));
   on('fs.write', (_$, e) => {
     if (options.failWrite && e.path.includes(options.failWrite)) return { deny: 'EACCES' };
@@ -88,6 +96,11 @@ async function fastCompact($: Engine, w: World, args = '') {
   return { said: said.text ?? '', result };
 }
 
+const AUTO = { options: { autoCompact: true } };
+const cutOf = (messages: readonly SessionMessage[] | undefined): boolean =>
+  messages?.some((m) => m.toolResults?.some((r) => r.text.includes('[fast-compact: cut '))) ?? false;
+const ledgerOf = (w: World) => JSON.parse(w.files.get([...w.files.keys()].find((p) => /\/ledger-\d{4}-\d{2}\.jsonl$/.test(p))!)!.trim());
+
 describe('native compaction is left alone', () => {
   test('/compact goes to core', async ($, on) => {
     world(on);
@@ -131,7 +144,7 @@ describe('/fc', () => {
     expect(write.input['file_path']).toBe('/repo/src/new.ts');
     expect(w.requests[0]!.url).toBe('https://openrouter.ai/api/v1/systemone');
     expect(JSON.parse(w.requests[0]!.body).state.focus).toBe('the test');
-    expect(w.logs.join('\n')).toMatch(/^.* → .* chars \(−\d+%\); 4 outputs cut, 1 kept whole on Jev’s ranking, 1 inputs cut; Jev typesafe\/jev-1\.13-test/);
+    expect(w.logs.join('\n')).toMatch(/^.* → .* chars \(−\d+%\); 4 outputs cut, 1 kept whole on Jev’s ranking, 1 input cut; Jev typesafe\/jev-1\.13-test/);
     const ledgerPath = [...w.files.keys()].find((p) => /\/ledger-\d{4}-\d{2}\.jsonl$/.test(p))!;
     const ledger = JSON.parse(w.files.get(ledgerPath)!.trim());
     expect(ledger).toMatchObject({ session: 'sess-1', outputs: 4, inputs: 1, whole: 1, ranking: 'jev', provider: 'openrouter' });
@@ -143,6 +156,29 @@ describe('/fc', () => {
     expect(result.messages).toBeDefined();
     expect(w.requests).toHaveLength(0);
     expect(w.logs.join('\n')).toContain('no Jev (no Jev key), newest kept whole');
+  });
+
+  test('provider none: never asks Jev, even with a key set', { options: { provider: 'none' } }, async ($, on) => {
+    const w = world(on, { env: { OPENROUTER_API_KEY: 'test-key' }, jev: jevFavouring('END2', 0.9) });
+    const { result } = await fastCompact($, w);
+    expect(cutOf(result.messages)).toBe(true);
+    expect(w.requests).toHaveLength(0);
+    expect(w.logs.join('\n')).toContain('no Jev (provider none), newest kept whole');
+    expect(ledgerOf(w)).toMatchObject({ ranking: 'newest', provider: 'none' });
+  });
+
+  test('provider none: no request with the apiKey option set either', { options: { provider: 'none', apiKey: 'k' } }, async ($, on) => {
+    const w = world(on, { jev: jevFavouring('END2', 0.9) });
+    const { result } = await fastCompact($, w);
+    expect(cutOf(result.messages)).toBe(true);
+    expect(w.requests).toHaveLength(0);
+  });
+
+  test('an unknown provider sends nothing, and the report says why', { options: { provider: 'openroute' } }, async ($, on) => {
+    const w = world(on, { env: { OPENROUTER_API_KEY: 'k' }, jev: jevFavouring('END2', 0.9) });
+    await fastCompact($, w);
+    expect(w.requests).toHaveLength(0);
+    expect(w.logs.join('\n')).toContain('no Jev (unknown provider "openroute"), newest kept whole');
   });
 
   test('Jev blocked by a firewall page: still compacts and names the cause', async ($, on) => {
@@ -204,6 +240,18 @@ describe('/fc', () => {
     expect(result.messages?.some((m) => m.toolResults?.some((r) => r.text.includes('[fast-compact: cut ')))).toBe(true);
   });
 
+  test('a compaction that never reaches the plugin: the log says so, then /fc and the meter are off', async ($, on) => {
+    const w = world(on);
+    const said = await $.command.run({ command: 'fc', args: '', ...COMMAND });
+    expect(said.text).toContain('compacting');
+    await w.clock.advance(1);
+    expect(w.logs.at(-1)).toContain('did not reach fast-compact, so Claude Code ran its own /compact');
+    const again = await $.command.run({ command: 'fc', args: '', ...COMMAND });
+    expect(again.text).toContain('off for this session');
+    await $.session.measure({ context: { window: 400_000, tokens: 100_000 }, rateLimits: [], changed: ['context'] });
+    expect(w.status.at(-1)).toBeUndefined();
+  });
+
   test('a second /fc while the first is running is refused', async ($, on) => {
     world(on);
     await $.command.run({ command: 'fc', args: '', ...COMMAND });
@@ -231,13 +279,6 @@ describe('/fc', () => {
   });
 });
 
-/** A test's plugin options: the test host takes `options`, which its TestOptions type does not declare yet. */
-const withOptions = (options: Record<string, unknown>): TestOptions => ({ options }) as unknown as TestOptions;
-const AUTO = withOptions({ autoCompact: true });
-const cutOf = (messages: readonly SessionMessage[] | undefined): boolean =>
-  messages?.some((m) => m.toolResults?.some((r) => r.text.includes('[fast-compact: cut '))) ?? false;
-const ledgerOf = (w: World) => JSON.parse(w.files.get([...w.files.keys()].find((p) => /\/ledger-\d{4}-\d{2}\.jsonl$/.test(p))!)!.trim());
-
 describe('autoCompact', () => {
   test('auto-compaction is cut the way /fc cuts, every cut archived, the ledger saying auto', AUTO, async ($, on) => {
     const w = world(on);
@@ -252,6 +293,21 @@ describe('autoCompact', () => {
     const talk: SessionMessage = { role: 'user', text: 'x'.repeat(400_000), toolUses: [] };
     const result = await $.session.compact({ trigger: 'auto', messages: [talk, ...conversation()] });
     expect(result.messages?.[0]?.text).toBe('core summary');
+  });
+
+  test('when even cutting everything would not free enough, Jev is not asked', { options: { autoCompact: true } }, async ($, on) => {
+    const w = world(on, { env: { OPENROUTER_API_KEY: 'k' }, jev: jevFavouring('END2', 0.9) });
+    const talk: SessionMessage = { role: 'user', text: 'x'.repeat(400_000), toolUses: [] };
+    const result = await $.session.compact({ trigger: 'auto', messages: [talk, ...conversation()] });
+    expect(result.messages?.[0]?.text).toBe('core summary');
+    expect(w.requests).toHaveLength(0);
+  });
+
+  test('provider none: auto-compaction is cut without asking Jev', { options: { autoCompact: true, provider: 'none' } }, async ($, on) => {
+    const w = world(on, { env: { OPENROUTER_API_KEY: 'k' }, jev: jevFavouring('END2', 0.9) });
+    const result = await $.session.compact({ trigger: 'auto', messages: conversation() });
+    expect(cutOf(result.messages)).toBe(true);
+    expect(w.requests).toHaveLength(0);
   });
 
   test('nothing old enough to cut: Claude Code summarises', AUTO, async ($, on) => {
@@ -277,7 +333,7 @@ describe('meter', () => {
   const MEASURE = { context: { window: 400_000, tokens: 100_000 }, rateLimits: [], changed: ['context' as const] };
   const FILE = '/Users/tester/.claude/fast-compact/meter/sess-1';
 
-  test('statusline: after a turn the file holds the tokens /fc would free; a compaction clears it', withOptions({ meter: 'statusline' }), async ($, on) => {
+  test('statusline: after a turn the file holds the tokens /fc would free; a compaction clears it', { options: { meter: 'statusline' } }, async ($, on) => {
     const w = world(on);
     await $.session.measure(MEASURE);
     expect(Number(w.files.get(FILE))).toBeGreaterThan(2_000);
@@ -286,15 +342,65 @@ describe('meter', () => {
     expect(w.files.get(FILE)).toBe('');
   });
 
-  test('prompt: a line under the prompt after a turn, cleared by a compaction', withOptions({ meter: 'prompt' }), async ($, on) => {
+  test('prompt: a line under the prompt after a turn, cleared by a compaction', { options: { meter: 'prompt' } }, async ($, on) => {
     const w = world(on);
     await $.session.measure(MEASURE);
-    expect(w.status.at(-1)).toMatch(/^\/fc would free ~[\d.]+k tokens \(4 old outputs\)$/);
+    expect(w.status.at(-1)).toMatch(/^\/fc frees ~[\d.]+k tokens \(\d+%\) · hide: \/plugin configure fast-compact → meter$/);
     await $.session.compact({ trigger: 'manual', messages: conversation() });
     expect(w.status.at(-1)).toBeUndefined();
   });
 
-  test('off by default: no file, no line', async ($, on) => {
+  test('both: the line under the prompt and the file', { options: { meter: 'both' } }, async ($, on) => {
+    const w = world(on);
+    await $.session.measure(MEASURE);
+    expect(w.status.at(-1)).toMatch(/^\/fc frees ~[\d.]+k tokens/);
+    expect(Number(w.files.get(FILE))).toBeGreaterThan(2_000);
+  });
+
+  test('the hint how to hide it: on the first three lines, then dropped', async ($, on) => {
+    const w = world(on);
+    for (let i = 0; i < 4; i++) await $.session.measure(MEASURE);
+    expect(w.status.slice(0, 3).every((line) => line?.endsWith('→ meter'))).toBe(true);
+    expect(w.status[3]).toMatch(/^\/fc frees ~[\d.]+k tokens \(\d+%\)$/);
+  });
+
+  test('prompt by default: a line, no file', async ($, on) => {
+    const w = world(on);
+    await $.session.measure(MEASURE);
+    expect(w.status.at(-1)).toMatch(/^\/fc frees ~[\d.]+k tokens/);
+    expect(w.files.has(FILE)).toBe(false);
+  });
+
+  test('both: a compaction clears the line and the file', { options: { meter: 'both' } }, async ($, on) => {
+    const w = world(on);
+    await $.session.measure(MEASURE);
+    await $.session.compact({ trigger: 'manual', messages: conversation() });
+    expect(w.status.at(-1)).toBeUndefined();
+    expect(w.files.get(FILE)).toBe('');
+  });
+
+  test('a measurement where only the rate limits moved leaves the line as it is', async ($, on) => {
+    const w = world(on);
+    await $.session.measure({ ...MEASURE, changed: ['rateLimits'] });
+    expect(w.status).toHaveLength(0);
+  });
+
+  test('under 2k tokens to free: no line', async ($, on) => {
+    const w = world(on, { messages: () => conversation().slice(-12) });
+    await $.session.measure(MEASURE);
+    expect(w.status.at(-1)).toBeUndefined();
+  });
+
+  test('right after /fc: nothing to show, since what it kept whole stays whole', async ($, on) => {
+    let after: SessionMessage[] | undefined;
+    const w = world(on, { messages: () => after ?? conversation() });
+    const { result } = await fastCompact($, w);
+    after = result.messages as SessionMessage[];
+    await $.session.measure(MEASURE);
+    expect(w.status.at(-1)).toBeUndefined();
+  });
+
+  test('off: no file, no line', { options: { meter: 'off' } }, async ($, on) => {
     const w = world(on);
     await $.session.measure(MEASURE);
     expect(w.files.has(FILE)).toBe(false);

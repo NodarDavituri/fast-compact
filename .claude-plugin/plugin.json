@@ -1,6 +1,6 @@
 {
   "name": "fast-compact",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "/fast-compact (and /fc): cut old tool output to its start and end in about a second, with Jev keeping whole what is still needed and every cut saved to a file. Claude Code's own /compact is untouched.",
   "author": { "name": "Nodar Davituri", "url": "https://github.com/NodarDavituri" },
   "homepage": "https://github.com/NodarDavituri/fast-compact",
@@ -11,7 +11,7 @@
     "provider": {
       "type": "string",
       "title": "Jev provider",
-      "description": "openrouter (default; key in OPENROUTER_API_KEY) or typesafe (key in TYPESAFE_API_KEY).",
+      "description": "openrouter (default; key in OPENROUTER_API_KEY), typesafe (key in TYPESAFE_API_KEY), or none (never ask Jev: the newest outputs stay whole and nothing is sent). Any other value counts as none.",
       "default": "openrouter"
     },
     "apiKey": {
@@ -82,8 +82,9 @@
     "meter": {
       "type": "string",
       "title": "Show what /fc would free",
-      "description": "off (default), prompt (a line under the prompt after each turn) or statusline (the token count in ~/.claude/fast-compact/meter/<session id>, for your status line).",
-      "default": "off"
+      "description": "prompt (default; a line under the prompt after each turn, in tokens and as a share of the window), statusline (the token count in ~/.claude/fast-compact/meter/<session id>, for your status line), both, or off.",
+      "options": ["prompt", "statusline", "both", "off"],
+      "default": "prompt"
     }
   }
 }

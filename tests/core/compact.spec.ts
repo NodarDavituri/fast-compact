@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
-import { applyCuts, chooseWhole, decide, estimate, fresh, plan, protectedFrom, sizeOf } from '../../src/compact.js';
+import { applyCuts, chooseWhole, decide, estimate, fresh, freshBatches, mostFreed, plan, protectedFrom, sizeOf } from '../../src/compact.js';
 import type { Transport } from '../../src/jev.js';
-import { CUT_MARK } from '../../src/text.js';
+import { CUT_MARK, cutChars, cutMiddle } from '../../src/text.js';
 import { DEFAULT_OPTIONS, type Cut, type Message } from '../../src/types.js';
 import { assistant, big, call, session, user } from './fixtures.js';
 
@@ -213,5 +213,63 @@ describe('estimate', () => {
 
   test('nothing old enough: nothing to free', async () => {
     expect(await estimate(session(3, 2), options)).toEqual({ chars: 0, tokens: 0, outputs: 0 });
+  });
+});
+
+describe('a second compaction', () => {
+  test('keeps whole what the first kept whole: earlier cuts count in the budget at their full size', async () => {
+    const options = { ...DEFAULT_OPTIONS, keepRecentCalls: 2 };
+    const messages = session(40, 2, 10_000);
+    const first = await decide(messages, options, undefined);
+    expect(first.whole.size).toBeGreaterThan(5);
+    const once = applyCuts(messages, first.cuts, pathOf, options);
+    const second = await decide(once, options, undefined);
+    expect(second.whole).toEqual(first.whole);
+    expect(second.cuts.filter((c) => c.kind === 'output')).toHaveLength(0);
+    expect((await estimate(once, options)).tokens).toBe(0);
+  });
+
+  test('cutChars reads what a whole marker took, and nothing from a quote of its opening', () => {
+    expect(cutChars(cutMiddle('a'.repeat(5000), 1500, '/x/output-t1.txt', 'this output'))).toBe(3500);
+    expect(cutChars('grep "[fast-compact: cut 12 chars" in the source')).toBe(0);
+  });
+});
+
+describe('mostFreed', () => {
+  test('at least what the meter estimates, and 0 with nothing old enough', async () => {
+    const messages = session(6, 10);
+    expect(mostFreed(messages, options)).toBeGreaterThanOrEqual((await estimate(messages, options)).chars);
+    expect(mostFreed(session(0, 10), options)).toBe(0);
+  });
+});
+
+describe('freshBatches (resumeSafe off)', () => {
+  const parallel = (): Message[] => [
+    user('go'),
+    { role: 'assistant', text: '', toolUses: [{ tool_use_id: 'a', tool: 'Agent', input: { prompt: 'x' } }], handle: 'h1' },
+    { role: 'assistant', text: '', toolUses: [{ tool_use_id: 'b', tool: 'Agent', input: { prompt: 'y' } }], handle: 'h2' },
+    { role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: 'a', text: 'A', isError: false }], handle: 'h3' },
+    { role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: 'b', text: 'B', isError: false }], handle: 'h4' },
+  ];
+
+  test('a parallel batch with a rebuilt message is merged, without handles', () => {
+    const messages = parallel();
+    const { handle: _h, ...rebuilt } = messages[1]!;
+    messages[1] = rebuilt;
+    const out = freshBatches(messages);
+    expect(out).toHaveLength(3);
+    expect(out[1]!.toolUses.map((u) => u.tool_use_id)).toEqual(['a', 'b']);
+    expect(out[2]!.toolResults!.map((r) => r.tool_use_id)).toEqual(['a', 'b']);
+    expect(out[0]!.handle).toBe(messages[0]!.handle);
+    expect(out.slice(1).every((m) => m.handle === undefined)).toBe(true);
+  });
+
+  test('an untouched batch, and calls in sequence, keep their handles', () => {
+    const untouched = parallel();
+    expect(freshBatches(untouched)).toEqual(untouched);
+    const sequence = session(3, 3);
+    const { handle: _h, ...rebuilt } = sequence[3]!;
+    sequence[3] = rebuilt;
+    expect(freshBatches(sequence)).toEqual(sequence);
   });
 });

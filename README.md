@@ -115,7 +115,7 @@ claude plugin marketplace update fast-compact
 claude plugin update fast-compact@fast-compact
 ```
 
-Then restart Claude Code or run `/reload-plugins`.
+Then restart Claude Code or run `/reload-plugins`. What changed in each version, and anything you need to do, is in [CHANGELOG.md](CHANGELOG.md).
 
 ## Options
 
